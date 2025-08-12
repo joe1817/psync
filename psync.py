@@ -17,7 +17,8 @@ from fnmatch import fnmatch
 from types import SimpleNamespace
 from typing import NamedTuple, Any
 
-from direntry_walk import direntry_walk
+import path_funcs
+from sftp import RemotePath
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -122,18 +123,18 @@ class _Metadata(NamedTuple):
 class _FileList(NamedTuple):
 	'''File and directory information returned by `_scandir()`.'''
 
-	root             : Path
+	root             : Path|RemotePath
 	relpath_to_stats : dict[str, _Metadata]
 	real_names       : dict[str, str]
 	empty_dirs       : set[str]
 	#nonempty_dirs   : set[str]
-	visited_inodes   : set[int]
+	visited_dirs     : set[str]
 
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
 
 	def __init__(self) -> None:
-		self.trash_root : Path | None = None
+		self.trash_root : Path | RemotePath | None = None
 		self.log_file   : Path | None = None
 
 		self.success    : bool        = False
@@ -303,14 +304,30 @@ def sync(
 			msg = f"Bad type for arg 'veryquiet' (expected bool): {veryquiet}"
 			raise TypeError(msg)
 
-		src_root = Path(src)
-		dst_root = Path(dst)
+		src = str(src)
+		dst = str(dst)
+		trash = str(trash) if trash else None
+
+		src_root : Path|RemotePath
+		dst_root : Path|RemotePath
+		trash_root : Path|RemotePath|None = None
+
+		if "@" in src:
+			src_root = RemotePath.create(str(src))
+		else:
+			src_root = Path(src)
+		if "@" in dst:
+			dst_root = RemotePath.create(str(dst))
+		else:
+			dst_root = Path(dst)
 
 		timestamp = str(int(time.time()*1000))
 		if trash is None:
 			trash_root = None
 		elif trash == "auto":
 			trash_root = dst_root.parent / f"Trash.{timestamp}"
+		elif "@" in trash:
+			trash_root = RemotePath.create(str(trash))
 		else:
 			trash_root = Path(trash) / timestamp
 		results.trash_root = trash_root
@@ -345,9 +362,10 @@ def sync(
 				trash_root.mkdir(exist_ok=True, parents=True)
 
 		if trash_root is not None and trash_root.exists():
-			if os.stat(trash_root).st_dev != os.stat(dst_root).st_dev:
-				msg = f"Chosen trash_root is not on the same file system as dst_root: {trash_root}"
-				raise ValueError(msg)
+		#	if os.stat(trash_root).st_dev != os.stat(dst_root).st_dev:
+		#		msg = f"Chosen trash_root is not on the same file system as dst_root: {trash_root}"
+		#		raise ValueError(msg)
+			pass # TODO
 		if rename_threshold is not None and rename_threshold < 0:
 			msg = f"rename_threshold must be non-negative: {rename_threshold}"
 			raise ValueError(msg)
@@ -499,7 +517,7 @@ def sync(
 
 	return results
 
-def _scandir(root:Path, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, follow_symlinks:bool = False) -> _FileList:
+def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, follow_symlinks:bool = False) -> _FileList:
 	'''
 	Retrieves file information for all files under `root`, including relative paths (relative to `root`), sizes, and mtimes.
 
@@ -515,25 +533,26 @@ def _scandir(root:Path, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = Fal
 		relpath_to_stats = {},
 		real_names       = {},
 		empty_dirs       = set(),
-		visited_inodes   = set(),
+		visited_dirs     = set(),
 	)
 	f = _Filter(filter, ignore_hidden=ignore_hidden)
 
-	for dir, subdirnames, file_entries in direntry_walk(root, followlinks=follow_symlinks):
+	for dir, subdirnames, file_entries in path_funcs.walk_path(root, followlinks=follow_symlinks):
 		logger.debug(f"scanning: {dir}")
+		dir = Path(dir)
 
 		if follow_symlinks:
-			inode = os.stat(dir).st_ino
-			if inode in file_list.visited_inodes:
+			d = dir.resolve()
+			if d in file_list.visited_dirs:
 				raise ValueError(f"Symlink circular reference: {dir}")
-			file_list.visited_inodes.add(inode)
+			file_list.visited_dirs.add(str(d))
 
 		# sorting may be needed if _listdir is changed to yield folder-by-folder
 		#subdirnames.sort()
 		#file_entries.sort()
 
-		dir_relpath = os.path.relpath(dir, root)
-		normed_dir_relpath = os.path.normcase(dir_relpath)
+		dir_relpath = str(dir.relative_to(root))
+		normed_dir_relpath = path_funcs.normcase(dir_relpath)
 
 		# catalog empty directory
 		if dir_relpath != "." and not file_entries and not subdirnames and f.filter(dir_relpath + os.sep):
@@ -548,8 +567,8 @@ def _scandir(root:Path, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = Fal
 		while i < len(subdirnames):
 			# symlinks are encountered here but they aren't followed unless followlinks is True
 			subdirname = subdirnames[i]
-			subdir_path = os.path.join(dir, subdirname)
-			subdir_relpath = os.path.relpath(subdir_path, root)
+			subdir_path = dir / subdirname
+			subdir_relpath = str(subdir_path.relative_to(root))
 			if not f.filter(subdir_relpath + os.sep):
 				del subdirnames[i]
 				continue
@@ -558,9 +577,9 @@ def _scandir(root:Path, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = Fal
 		# prune files
 		for entry in file_entries:
 			filename = entry.name
-			file_path = os.path.join(dir, filename)
-			file_relpath = os.path.relpath(file_path, root)
-			normed_file_relpath = os.path.normcase(file_relpath)
+			file_path = dir / filename
+			file_relpath = str(file_path.relative_to(root))
+			normed_file_relpath = path_funcs.normcase(file_relpath)
 			if (f.filter(file_relpath)):
 				stat = entry.stat(follow_symlinks=follow_symlinks)
 				meta = _Metadata(size = stat.st_size, mtime = stat.st_mtime)
@@ -573,7 +592,7 @@ def _operations(
 		src_files        : _FileList,
 		dst_files        : _FileList,
 		*,
-		trash_root       : Path | None,
+		trash_root       : Path | RemotePath | None,
 		rename_threshold : int  | None,
 		metadata_only    : bool
 	):
@@ -702,7 +721,7 @@ def _reverse_dict(old_dict:dict[Any, Any]) -> dict[Any, Any]:
 			reversed[val] = key
 	return reversed
 
-def _copy(src:Path, dst:Path, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
+def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
 	'''Copy file from `src` to `dst`, keeping timestamp metadata. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
 	if dst.exists():
@@ -719,7 +738,7 @@ def _copy(src:Path, dst:Path, *, exist_ok:bool = True, follow_symlinks:bool = Fa
 		# Copy into a temp file, with metadata
 		dir = dst.parent
 		dir.mkdir(parents=True, exist_ok=True)
-		shutil.copy2(src, dst_tmp, follow_symlinks=follow_symlinks)
+		path_funcs.copy(src, dst_tmp, follow_symlinks=follow_symlinks)
 		delete_tmp = True
 		try:
 			# Rename the temp file into the dest file
@@ -729,7 +748,8 @@ def _copy(src:Path, dst:Path, *, exist_ok:bool = True, follow_symlinks:bool = Fa
 			# Remove read-only flag and try again
 			make_readonly = False
 			try:
-				if not (dst.stat().st_mode & stat.S_IREAD):
+				dst_stat = dst.stat()
+				if dst_stat.st_mode is None or not (dst_stat.st_mode & stat.S_IREAD):
 					raise e
 				dst.chmod(stat.S_IWRITE)
 				make_readonly = True
@@ -743,7 +763,7 @@ def _copy(src:Path, dst:Path, *, exist_ok:bool = True, follow_symlinks:bool = Fa
 		if delete_tmp:
 			dst_tmp.unlink()
 
-def _move(src:Path, dst:Path, *, exist_ok:bool = False, delete_empty_dirs_under:Path|None = None) -> None:
+def _move(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = False, delete_empty_dirs_under:Path|RemotePath|None = None) -> None:
 	'''
 	Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.
 
@@ -767,7 +787,7 @@ def _move(src:Path, dst:Path, *, exist_ok:bool = False, delete_empty_dirs_under:
 	if delete_empty_dirs_under is not None:
 		_delete_empty_dirs(src.parent, root=delete_empty_dirs_under)
 
-def _delete_empty_dirs(dir:Path, *, root:Path) -> None:
+def _delete_empty_dirs(dir:Path|RemotePath, *, root:Path|RemotePath) -> None:
 	'''Iteratively delete empty directories, starting with `dir` and moving up to (but not including) `root`.'''
 
 	if not dir.is_dir():
@@ -837,6 +857,8 @@ def main() -> None:
 	except Exception:
 		print()
 		traceback.print_exc()
+	finally:
+		RemotePath.close_connections()
 
 if __name__ == "__main__":
 	main()

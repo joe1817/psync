@@ -156,6 +156,18 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("b/b/y"))
 		self.assertFalse(f.filter("aa/y"))
 
+		f = psync._Filter("+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
+		self.assertTrue(f.filter("a"))
+		self.assertTrue(f.filter("A"))
+		self.assertTrue(f.filter("b"))
+		self.assertTrue(f.filter("B"))
+		self.assertFalse(f.filter("c"))
+		self.assertFalse(f.filter("C"))
+		self.assertFalse(f.filter(".a"))
+		self.assertFalse(f.filter(".A"))
+		self.assertFalse(f.filter("d/.a"))
+		self.assertFalse(f.filter("d/.A"))
+
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_scandir(self):
@@ -237,7 +249,7 @@ class TestBackup(unittest.TestCase):
 				"a/1.jpg",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_stats.keys()),
+				sorted(files.relpath_to_meta.keys()),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -253,7 +265,7 @@ class TestBackup(unittest.TestCase):
 				"a/ac/acb/12.html",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_stats.keys()),
+				sorted(files.relpath_to_meta.keys()),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -287,7 +299,7 @@ class TestBackup(unittest.TestCase):
 				"2.txt",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_stats.keys()),
+				sorted(files.relpath_to_meta.keys()),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -305,7 +317,7 @@ class TestBackup(unittest.TestCase):
 				"ea/2.txt",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_stats.keys()),
+				sorted(files.relpath_to_meta.keys()),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -353,9 +365,10 @@ class TestBackup(unittest.TestCase):
 			actual = list(x[4] for x in psync._operations(
 				a_files,
 				b_files,
-				trash_root	     = Path("/"),
+				trash_root       = Path("/"),
+				delete_files     = False,
 				rename_threshold = 0,
-				metadata_only	 = True
+				metadata_only    = True,
 			))
 
 			if "nt" in os.name:
@@ -374,12 +387,13 @@ class TestBackup(unittest.TestCase):
 			actual = list(x[4] for x in psync._operations(
 				a_files,
 				c_files,
-				trash_root	   = Path("/"),
+				trash_root       = Path("/"),
+				delete_files     = False,
 				rename_threshold = 1000,
-				metadata_only	= True
+				metadata_only    = True,
 			))
 			expected = [
-				f"- {os.path.join('aa','1.txt')}",
+				f"~ {os.path.join('aa','1.txt')}",
 				f"+ {os.path.join('a','1.txt')}"
 			]
 			self.assertEqual(actual, expected)
@@ -391,17 +405,18 @@ class TestBackup(unittest.TestCase):
 			test_root = Path(temp_root)
 			file_structure = {
 				"a": {
-					"b": {
+					"a": {
 						"1.txt": None
 					}
 				}
 			}
 			create_file_structure(test_root, file_structure)
 
-			src = test_root / "a" / "b" / "1.txt"
-			dst = test_root / "A" / "B" / "2.txt"
-			psync._move(src, dst, delete_empty_dirs_under=test_root)
-			self.assertEqual(os.listdir(test_root / "A" / "B"), ["2.txt"])
+			src = test_root / "a" / "a" / "1.txt"
+			dst = test_root / "b" / "b" / "2.txt"
+			psync._move(src, dst)
+			self.assertEqual(os.listdir(test_root / "a" / "a"), [])
+			self.assertEqual(os.listdir(test_root / "b" / "b"), ["2.txt"])
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

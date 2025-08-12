@@ -15,9 +15,21 @@
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/`, replacing files whose modtimes are newer in `src/`.
 
+`python psync.py src dst -x`
+
+&emsp; ↳ Recursively copies files inside `src/` to `dst/` and deletes extra files (i.e., files that exist in `dst/` but not `src/`).
+
 `python psync.py src dst -t trash`
 
-&emsp; ↳ Same as above but will also "recycle" extra files (i.e., those that exist in `dst/` but not `src/`) into `trash/`.
+&emsp; ↳ Recursively copies files inside `src/` to `dst/` and moves extra files into `trash/`.
+
+`python psync.py src user@192.168.1.100/dst`
+
+&emsp; ↳ Sync using SFTP the local `src/` directory to the remote `dst/` directory.
+
+`python psync.py src dst !args.txt`
+
+&emsp; ↳ Recursively copies files inside `src/` to `dst/`, using arguments from the file, `args.txt`.
 
 ### Include/ Exclude
 

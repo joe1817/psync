@@ -71,6 +71,7 @@ class RemotePath:
 		self.stem         : str = parts[0].replace("\\", "/").split("/")[-1]
 		self.suffix       : str = parts[1]
 		self._stat        : paramiko.sftp_attr.SFTPAttributes|None = None
+		self._lstat       : paramiko.sftp_attr.SFTPAttributes|None = None
 
 	@property
 	def parent(self) -> "RemotePath":
@@ -104,13 +105,16 @@ class RemotePath:
 		return self.parent / new_name
 
 	def stat(self, *, follow_symlinks=True) -> paramiko.sftp_attr.SFTPAttributes:
-		if not self._stat:
-			if follow_symlinks:
+		if follow_symlinks:
+			if not self._stat:
 				self._stat = RemotePath.sftp_connections[self.conn_details].stat(str(self))
-			else:
-				self._stat = RemotePath.sftp_connections[self.conn_details].lstat(str(self))
-		assert self._stat is not None
-		return self._stat
+			assert self._stat is not None
+			return self._stat
+		else:
+			if not self._lstat:
+				self._lstat = RemotePath.sftp_connections[self.conn_details].lstat(str(self))
+			assert self._lstat is not None
+			return self._lstat
 
 	def exists(self, *, follow_symlinks:bool=True) -> bool:
 		try:
@@ -139,7 +143,12 @@ class RemotePath:
 		return stat.S_ISREG(attrs.st_mode)
 
 	def resolve(self, strict=False) -> "RemotePath":
-		return type(self)(RemotePath.sftp_connections[self.conn_details].normalize(str(self)), self.conn_details)
+		rp = type(self)(RemotePath.sftp_connections[self.conn_details].normalize(str(self)), self.conn_details)
+		if rp._stat is None:
+			rp._stat = self._stat
+		if rp._lstat is None:
+			rp._lstat = self._lstat
+		return rp
 
 	def iterdir(self) -> Generator["RemotePath"]:
 		for item_name in RemotePath.sftp_connections[self.conn_details].listdir(str(self)):

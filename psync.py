@@ -519,7 +519,7 @@ def sync(
 
 def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, follow_symlinks:bool = False) -> _FileList:
 	'''
-	Retrieves file information for all files under `root`, including relative paths (relative to `root`), sizes, and mtimes.
+	Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.
 
     Args
 		root (Path)            : The directory to search.
@@ -542,19 +542,18 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		dir = Path(dir)
 
 		if follow_symlinks:
-			d = dir.resolve()
+			d = str(dir.resolve())
 			if d in file_list.visited_dirs:
 				raise ValueError(f"Symlink circular reference: {dir}")
-			file_list.visited_dirs.add(str(d))
+			file_list.visited_dirs.add(d)
 
-		# sorting may be needed if _listdir is changed to yield folder-by-folder
 		#subdirnames.sort()
-		#file_entries.sort()
+		#file_entries.sort(key=lambda x: x.name)
 
 		dir_relpath = str(dir.relative_to(root))
 		normed_dir_relpath = path_funcs.normcase(dir_relpath)
 
-		# catalog empty directory
+		# record empty directory
 		if dir_relpath != "." and not file_entries and not subdirnames and f.filter(dir_relpath + os.sep):
 			file_list.empty_dirs.add(normed_dir_relpath)
 			file_list.real_names[normed_dir_relpath] = dir_relpath
@@ -565,7 +564,6 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		# prune search tree
 		i = 0
 		while i < len(subdirnames):
-			# symlinks are encountered here but they aren't followed unless followlinks is True
 			subdirname = subdirnames[i]
 			subdir_path = dir / subdirname
 			subdir_relpath = str(subdir_path.relative_to(root))

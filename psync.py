@@ -10,8 +10,8 @@ import stat
 import shutil
 import logging
 import tempfile
-import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from fnmatch import fnmatch
 from types import SimpleNamespace
@@ -321,11 +321,11 @@ def sync(
 		else:
 			dst_root = Path(dst)
 
-		timestamp = str(int(time.time()*1000))
+		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 		if trash is None:
 			trash_root = None
 		elif trash == "auto":
-			trash_root = dst_root.parent / f"Trash.{timestamp}"
+			trash_root = dst_root.parent / f"Trash_{timestamp}"
 		elif "@" in trash:
 			trash_root = RemotePath.create(str(trash))
 		else:
@@ -335,7 +335,7 @@ def sync(
 		if log is None:
 			log_file = None
 		elif log == "auto":
-			log_file = Path.home() / f"py-backup.{timestamp}.log"
+			log_file = Path.home() / f"py-backup_{timestamp}.log"
 		else:
 			log_file = Path(log)
 		results.log_file = log_file

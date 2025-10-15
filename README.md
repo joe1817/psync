@@ -35,24 +35,28 @@
 
 `psync.py` can include or exclude files and folders based on user-supplied, recursive glob patterns. Also note that the recursive glob, `**`, is treated like the non-recurisve glob, `*`, if it is adjacent to any character other than "\\" or "/".
 
-To make use of this option, keep in mind the following rules. This feature is accessed by supplying a filter string. The string contains various space-separated patterns, preceded by include ("+") and exclude ("-") indicators (e.g., `- skip.txt skip2.txt + **`). The patterns are matched against the relative paths of files and folders inside `src/` and `dst/`. If a pattern has a trailing slash (e.g., `foo/`), then the pattern will apply to folders only. Otherwise, the pattern will apply to files only. (The only exception is `**`, which applies to both files and folders.)
+To make use of this option, keep in mind the following rules. This feature is accessed by supplying a filter string. The string contains various space-separated patterns, preceded by include ("+") and exclude ("-") indicators (e.g., `- skip.txt skip2.txt + **`). The patterns are matched against the relative paths of files and folders inside `src/` and `dst/`. If a pattern has a trailing slash (e.g., `foo/`), then the pattern will only apply to folders. Otherwise, the pattern will only apply to files. (The only exception is `**`, which applies to both files and folders.)
 
-The indicator preceding the first matching pattern determines whether to include or exclude the filesystem entry. Included files will be copied in the backup, whereas included folders will be searched and their contents tested against the filter string. The default filter string is `+ **/*/ **/*`, which searches all folders and copies all files. If a user-defined filter is supplied, then any unmatched file or folder will be skipped (neither copied nor "recycled").
+The indicator preceding the first matching pattern determines whether to include or exclude the filesystem entry. Included files will be copied in the backup, whereas included folders will be searched and their contents tested against the filter string. The default filter string is `+ **/*/ **/*`, which searches all folders and copies all files. If a user-defined filter is supplied, then any unmatched file or folder will be ignored (neither copied nor "recycled"). An include indicator ("+") is assumed at the front of filter strings that don't start with "+" or "-".
 
 When a nested file is included, e.g., `+ foo/**/bar.txt`, then parent folders are also automatically included. This example is equiavlent to `+ foo/ foo/**/ foo/**/bar.txt`.
 
-`python psync.py src dst -f '+ foo.txt'`
+`python psync.py src dst -f foo.txt`
 
 &emsp; ↳ Copies the `foo.txt` file inside `src/` to `dst/`. Skips all other files and does not recurse into subfolders.
 
-`python psync.py src dst -f '+ **/*.txt'`
+`python psync.py src dst -f + **/*.txt`
 
 &emsp; ↳ Copies all .txt files inside `src/` to `dst/`.
 
-`python psync.py src dst -f '- "skip these/" + **/*.txt'`
+`python psync.py src dst -f - "skip these/" + **/*.txt`
 
 &emsp; ↳ Copies all .txt files inside `src/` to `dst/`, except those in the `src/skip these/` folder.
 
-`python psync.py src dst -f '- **/__pycache__/ + **'`
+`python psync.py src dst -f - **/__pycache__/ + **`
 
 &emsp; ↳ Copies all files inside `src/` to `dst/`, except for those inside folders named `__pycache__`.
+
+`python psync.py src dst -f "-" "--log"`
+
+&emsp; ↳ Copies all the `-` and `--log` files inside `src/` to `dst/`.

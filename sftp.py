@@ -55,11 +55,14 @@ class RemotePath:
 					timeout  = timeout,
 				)
 			except socket.gaierror as e:
-				raise ValueError("Invalid hostname") from e
+				raise ConnectionError("Invalid hostname.") from e
 			except TimeoutError as e:
-				raise ValueError("Host timeout") from e
+				raise ConnectionError("Host timeout.") from e
 			except paramiko.ssh_exception.AuthenticationException as e:
-				raise ValueError(str(e)) from e
+				raise ConnectionError(str(e)) from e
+			except PermissionError as e:
+				#raise ConnectionError("Access denied.") from e
+				raise ConnectionError(str(e)) from e
 			cls.ssh_connections[parsed.netloc] = ssh
 
 			ftp = ssh.open_sftp()

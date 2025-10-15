@@ -66,7 +66,7 @@ class _ArgParser:
 	extra_handling.add_argument("-t", "--trash", metavar="path", nargs="?", type=str, default=None, const="auto", help="The root directory to move 'extra' files (those that are in `dst` but not `src`). Must be on the same file system as `dst`. If set to \"auto\", then a directory will automatically be made next to `dst`. Extra files will not be moved if this option is omitted.")
 	extra_handling.add_argument("-x", "--delete-files", action="store_true", default=False, help="Permanently delete 'extra' files (those that are in `dst` but not `src`).")
 
-	parser.add_argument("-f", "--filter", metavar="filter_string", nargs=1, type=str, default="+ **/*/ **/*", help="The filter string (enclosed in quotes) that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with \"/\" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to \"+ **/*/ **/*\", which searches all directories and copies all files.)")
+	parser.add_argument("-f", "--filter", metavar="filter_string", nargs="+", type=str, default="+ **/*/ **/*", help="The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with \"/\" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to \"+ **/*/ **/*\", which searches all directories and copies all files.)")
 	parser.add_argument("-H", "--ignore-hidden", action="store_true", default=False, help="Skip hidden files by default. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
 	parser.add_argument("-I", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
 	parser.add_argument("-L", "--follow-symlinks", action="store_true", default=False, help="Follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this flag.")
@@ -91,46 +91,121 @@ class _Filter:
 
 	patterns : list[tuple[bool, re.Pattern]]
 
+	@classmethod
+	def tokenize(cls, s:str):
+		escape  :bool = False
+		s_quotes:bool = False
+		d_quotes:bool = False
+		token   :str  = ""
+
+		if "\0" in s:
+			raise _InputError("Invalid null character in filter string")
+		s += "\0"
+
+		for char in s:
+
+			if char.strip() == "":
+				if escape:
+					token += char
+					escape = False
+				elif s_quotes:
+					token += char
+				elif d_quotes:
+					token += char
+				elif token:
+					if token == "+":
+						yield True
+					elif token == "-":
+						yield False
+					else:
+						yield token
+					token = ""
+			elif char == "\0":
+				if escape:
+					raise _InputError("Unterminated escape sequence in filter string")
+				elif s_quotes:
+					raise _InputError("Unclosed quotes in filter string")
+				elif d_quotes:
+					raise _InputError("Unclosed quotes in filter string")
+				elif token:
+					if token == "+":
+						yield True
+					elif token == "-":
+						yield False
+					else:
+						yield token
+					token = ""
+			elif char == "\\":
+				if escape:
+					token += "\\"
+					escape = False
+				else:
+					escape = True
+			elif char == "'":
+				if escape:
+					# TODO warn if d_quotes (escaping this ' was unnecessary)
+					token += "'"
+					escape = False
+				elif s_quotes:
+					s_quotes = False
+				elif d_quotes:
+					token += "'"
+				else:
+					s_quotes = True
+			elif char == "\"":
+				if escape:
+					# TODO warn if s_quotes (escaping this " was unnecessary)
+					token += "\""
+					escape = False
+				elif d_quotes:
+					d_quotes = False
+				elif s_quotes:
+					token += "\""
+				else:
+					d_quotes = True
+			else:
+				if escape:
+					raise _InputError(f"Unrecognized esacpe sequence: \\{char}")
+				token += char
+
 	def __init__(self, filter_string:str, *, ignore_hidden:bool = False, ignore_case:bool = False):
 		self.patterns = []
-		implicit_dirs : set[str] = set()
+		implicit_dirs: set[str] = set()
 
-		filter_string = filter_string.strip()
-		for action, patterns in re.findall(r"(\+|-)\s+((?:(?:'[^']*'|\"[^\"]*\"|\S{2,}|[^\s\+-])\s*)+)", filter_string):
-			action = action == "+"
-			if not action:
-				# clear if - action
+		action = True
+
+		for token in _Filter.tokenize(filter_string):
+			if token == True:
+				action = True
+			elif token == False:
+				action = False
 				implicit_dirs = set()
-			for pattern in re.findall(r"'[^']*'|\"[^\"]*\"|\S{2,}|[^\s\+-]", patterns):
-				if pattern[0] == "'" or pattern[0] == "\"":
-					pattern = pattern[1:-1]
-				if pattern[:2] == ".\\" or pattern[:2] == "./":
-					pattern = pattern[2:]
+			else:
+				if token[:2] == ".\\" or token[:2] == "./":
+					token = token[2:]
+				if token:
+					if token == ".." or re.search(r"^\.\.[\\/]", token) or re.search(r"[\\/]\.\.[\\/]", token) or re.search(r"[\\/]\.\.$", token):
+						raise _InputError(f"Parent directories ('..') are not supported in pattern arguments to include/exclude: {token}")
+					if os.path.isabs(token):
+						raise _InputError(f"Absolute paths are not supported as arguments to include/exclude: {token}")
+					regex = glob.translate(token, recursive=True, include_hidden=(not ignore_hidden))
+					reobj = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
+					self.patterns.append((action, reobj))
 
-				if pattern == ".." or re.search("^\\\\.\\.[\\\\/]", pattern) or re.search("[\\\\/]\\.\\.[\\\\/]", pattern) or re.search("[\\\\/]\\.\\.$", pattern):
-					raise ValueError(f"Parent directories ('..') are not supported in pattern arguments to include/exclude: {pattern}")
-				if os.path.isabs(pattern):
-					raise ValueError(f"Absolute paths are not supported as arguments to include/exclude: {pattern}")
-
-				if pattern == "":
-					continue
-
-				regex = glob.translate(pattern, recursive=True, include_hidden=(not ignore_hidden))
-				reobj = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
-				self.patterns.append((action, reobj))
-
-				# include parent dirs for each include pattern
-				if action:
-					while True:
-						pattern = os.path.dirname(pattern)
-						if pattern == "":
-							break
-						if pattern in implicit_dirs:
-							break
-						implicit_dirs.add(pattern)
-						regex = glob.translate(pattern + "/", recursive=True, include_hidden=(not ignore_hidden))
-						reobj = re.compile(regex)
-						self.patterns.append((action, reobj))
+					# include parent dirs for each include pattern
+					if action:
+						if token.endswith("\\") or token.endswith("/"):
+							token = token[:-1]
+						while True:
+							token = os.path.dirname(token)
+							if token == "":
+								break
+							if token in implicit_dirs:
+								break
+							implicit_dirs.add(token)
+							regex = glob.translate(token + "/", recursive=True, include_hidden=(not ignore_hidden))
+							reobj = re.compile(regex)
+							self.patterns.append((action, reobj))
 
 	def filter(self, relpath:str, default:bool = False) -> bool:
 		'''Compare the file path against the filter string.'''
@@ -199,7 +274,7 @@ def sync_cmd(args:list[str]) -> Results:
 		parsed_args.dst,
 		trash            = parsed_args.trash,
 		delete_files     = parsed_args.delete_files,
-		filter           = parsed_args.filter[0],
+		filter           = " ".join(parsed_args.filter),
 		ignore_hidden    = parsed_args.ignore_hidden,
 		ignore_case      = parsed_args.ignore_case,
 		rename_threshold = parsed_args.rename_threshold,

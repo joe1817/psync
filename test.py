@@ -76,8 +76,17 @@ def load_tests(loader, tests, ignore):
 	return tests
 
 class TestBackup(unittest.TestCase):
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_argparse(self):
+		parsed = psync._ArgParser.parse(["src", "dst", "-f", "+ \"a b.txt\""])
+		self.assertTrue(parsed.filter[0] == "+ \"a b.txt\"")
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 	def test_filter(self):
-		f = psync._Filter("+ **")
+		f = psync._Filter(r"+ **")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -88,7 +97,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = psync._Filter("+ **/*")
+		f = psync._Filter(r"+ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -99,7 +108,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = psync._Filter("- **/.*/ **/__pycache__/ + **/*/ **/*")
+		f = psync._Filter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -110,7 +119,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("a/__pycache__/"))
 		self.assertFalse(f.filter("a/b/__pycache__/"))
 
-		f = psync._Filter("+ places.sqlite key4.db logins.json cookies.sqlite prefs.js - **/*/ **/*")
+		f = psync._Filter(r"+ places.sqlite key4.db logins.json cookies.sqlite prefs.js - **/*/ **/*")
 		self.assertTrue(f.filter("places.sqlite"))
 		self.assertTrue(f.filter("key4.db"))
 		self.assertTrue(f.filter("logins.json"))
@@ -119,7 +128,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("storage.sqlite"))
 		self.assertFalse(f.filter("storage/"))
 
-		f = psync._Filter("+ audio/music/**/*.flac - **/*/ **/*")
+		f = psync._Filter(r"+ audio/music/**/*.flac - **/*/ **/*")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -129,7 +138,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("audio/audiobooks/"))
 		self.assertFalse(f.filter("audio/music/OST/Star Wars/cover.jpg"))
 
-		f = psync._Filter("- audio/music/**/*.wav + **/*/ **/*")
+		f = psync._Filter(r"- audio/music/**/*.wav + **/*/ **/*")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -139,12 +148,12 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("audio/audiobooks/"))
 		self.assertTrue(f.filter("audio/music/OST/Titanic/cover.jpg"))
 
-		f = psync._Filter("- ./**/foo/bar/ '**/eggs and spam/' \"Joe's Files/\" + **/*/ **/*")
+		f = psync._Filter(r"- ./**/foo/bar/ '**/eggs and spam/' Joe\'s\ Files/ + **/*/ **/*")
 		self.assertFalse(f.filter("foo/bar/"))
 		self.assertFalse(f.filter("eggs and spam/"))
 		self.assertFalse(f.filter("Joe's Files/"))
 
-		f = psync._Filter("+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
+		f = psync._Filter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("b/a"))
 		self.assertTrue(f.filter("b/a/a"))
@@ -156,7 +165,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("b/b/y"))
 		self.assertFalse(f.filter("aa/y"))
 
-		f = psync._Filter("+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
+		f = psync._Filter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("A"))
 		self.assertTrue(f.filter("b"))
@@ -167,6 +176,58 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter(".A"))
 		self.assertFalse(f.filter("d/.a"))
 		self.assertFalse(f.filter("d/.A"))
+
+		f = psync._Filter(r"./a/ ./a/b")
+		self.assertTrue(f.filter("a/"))
+		self.assertTrue(f.filter("a/b"))
+		self.assertFalse(f.filter("c"))
+
+		f = psync._Filter(r"a")
+		self.assertTrue(f.filter("a"))
+		self.assertFalse(f.filter("b"))
+
+		f = psync._Filter(r"a/ a/b")
+		if os.sep == "\\":
+			self.assertTrue(f.filter("a/"))
+			self.assertTrue(f.filter("a\\"))
+			self.assertTrue(f.filter("a/b"))
+			self.assertTrue(f.filter("a\\b"))
+			self.assertFalse(f.filter("c"))
+		else:
+			self.assertTrue(f.filter("a/"))
+			self.assertFalse(f.filter("a\\"))
+			self.assertTrue(f.filter("a/b"))
+			self.assertFalse(f.filter("a\\b"))
+			self.assertFalse(f.filter("c"))
+
+		f = psync._Filter(r"a\\ a\\b")
+		if os.sep == "\\":
+			self.assertTrue(f.filter("a/"))
+			self.assertTrue(f.filter("a\\"))
+			self.assertTrue(f.filter("a/b"))
+			self.assertTrue(f.filter("a\\b"))
+			self.assertFalse(f.filter("c"))
+		else:
+			self.assertFalse(f.filter("a/"))
+			self.assertTrue(f.filter("a\\"))
+			self.assertFalse(f.filter("a/b"))
+			self.assertTrue(f.filter("a\\b"))
+			self.assertFalse(f.filter("c"))
+
+		f = psync._Filter(r"+ '- a' -a -- a\  a\ - ./- \"a a\'b")
+		self.assertTrue(f.filter("- a"))
+		self.assertTrue(f.filter("-a"))
+		self.assertTrue(f.filter("--"))
+		self.assertTrue(f.filter("a "))
+		self.assertTrue(f.filter("a -"))
+		self.assertTrue(f.filter("-"))
+		self.assertTrue(f.filter("\"a"))
+		self.assertTrue(f.filter("a'b"))
+		self.assertFalse(f.filter("b"))
+
+		self.assertRaises(psync._InputError, psync._Filter, r"+ 'a")
+		self.assertRaises(psync._InputError, psync._Filter,  "+ a\\")
+		self.assertRaises(psync._InputError, psync._Filter, r"+ a\b")
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

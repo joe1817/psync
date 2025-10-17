@@ -310,7 +310,7 @@ class TestBackup(unittest.TestCase):
 				"a/1.jpg",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_meta.keys()),
+				sorted(f.normpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -326,7 +326,7 @@ class TestBackup(unittest.TestCase):
 				"a/ac/acb/12.html",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_meta.keys()),
+				sorted(f.normpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -360,7 +360,7 @@ class TestBackup(unittest.TestCase):
 				"2.txt",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_meta.keys()),
+				sorted(f.normpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -378,7 +378,7 @@ class TestBackup(unittest.TestCase):
 				"ea/2.txt",
 			]
 			self.assertEqual(
-				sorted(files.relpath_to_meta.keys()),
+				sorted(f.normpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -412,20 +412,18 @@ class TestBackup(unittest.TestCase):
 
 			a_root = test_root / "a"
 			b_root = test_root / "b"
-			c_root = test_root / "c"
 			a_files = psync._scandir(
 				root = a_root
 			)
 			b_files = psync._scandir(
 				root = b_root
 			)
-			c_files = psync._scandir(
-				root = c_root
-			)
 
 			actual = list(x[4] for x in psync._operations(
-				a_files,
-				b_files,
+				src_root         = a_root,
+				dst_root         = b_root,
+				src_files        = a_files,
+				dst_files        = b_files,
 				trash_root       = Path("/"),
 				delete_files     = False,
 				rename_threshold = 0,
@@ -445,9 +443,19 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
+			a_root = test_root / "a"
+			c_root = test_root / "c"
+			a_files = psync._scandir(
+				root = a_root
+			)
+			c_files = psync._scandir(
+				root = c_root
+			)
 			actual = list(x[4] for x in psync._operations(
-				a_files,
-				c_files,
+				src_root         = a_root,
+				dst_root         = c_root,
+				src_files        = a_files,
+				dst_files        = c_files,
 				trash_root       = Path("/"),
 				delete_files     = False,
 				rename_threshold = 1000,

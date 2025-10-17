@@ -95,7 +95,6 @@ class _Filter:
 		self.patterns = []
 		implicit_dirs : set[str] = set()
 
-		r'''
 		filter_string = filter_string.strip()
 		for action, patterns in re.findall(r"(\+|-)\s+((?:(?:'[^']*'|\"[^\"]*\"|\S{2,}|[^\s\+-])\s*)+)", filter_string):
 			action = action == "+"
@@ -132,7 +131,6 @@ class _Filter:
 						regex = glob.translate(pattern + "/", recursive=True, include_hidden=(not ignore_hidden))
 						reobj = re.compile(regex)
 						self.patterns.append((action, reobj))
-		'''
 
 	def filter(self, relpath:str, default:bool = False) -> bool:
 		'''Compare the file path against the filter string.'''

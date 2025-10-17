@@ -242,15 +242,13 @@ class _Metadata(NamedTuple):
 	size  : int
 	mtime : float
 
-class _FileList(NamedTuple):
-	'''File and directory information returned by `_scandir()`.'''
+class _ScandirEntry(NamedTuple):
+	'''Filesystem entries yielded by `_scandir()`.'''
 
-	root            : Path|RemotePath
-	relpath_to_meta : dict[str, _Metadata]
-	real_names      : dict[str, str]
-	empty_dirs      : set[str]
-	#nonempty_dirs  : set[str]
-	visited_dirs    : set[str]
+	cat      : str # file, empty_dir
+	normpath : str # normcase'd
+	path     : str
+	meta     : _Metadata
 
 class _InputError(ValueError):
 	''' Error that indicates the root cause was due to bad input and that a stack trace does not need to be logged. '''
@@ -553,8 +551,10 @@ def sync(
 		dst_files = _scandir(dst_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
 
 		for op, src_file, dst_file, byte_diff, summary in _operations(
-			src_files,
-			dst_files,
+			src_root         = src_root,
+			dst_root         = dst_root,
+			src_files        = src_files,
+			dst_files        = dst_files,
 			trash_root       = trash_root,
 			delete_files     = delete_files,
 			rename_threshold = rename_threshold,
@@ -689,7 +689,7 @@ def sync(
 
 	return results
 
-def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, ignore_case:bool = False, follow_symlinks:bool = False, sftp_compat:bool = False) -> _FileList:
+def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, ignore_case:bool = False, follow_symlinks:bool = False, sftp_compat:bool = False): # -> TODO
 	'''
 	Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.
 
@@ -702,13 +702,7 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		sftp_compat     (bool) : Whether to work in SFTP compatibility mode, which will truncate milliseconds off the file modification times, treat file names case-sensitively on Windows, and return paths with forward slashes. (Defaults to `False`.)
 	'''
 
-	file_list = _FileList(
-		root            = root,
-		relpath_to_meta = {},
-		real_names      = {},
-		empty_dirs      = set(),
-		visited_dirs    = set(),
-	)
+	visited_dirs = set()
 	f = _Filter(filter, ignore_hidden=ignore_hidden)
 
 	convert_sep = sftp_compat and os.sep == "\\" and not isinstance(root, RemotePath)
@@ -719,9 +713,9 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 
 		if follow_symlinks:
 			d = str(dir.resolve())
-			if d in file_list.visited_dirs:
+			if d in visited_dirs:
 				raise ValueError(f"Symlink circular reference: {dir}")
-			file_list.visited_dirs.add(d)
+			visited_dirs.add(d)
 
 		#dir_entries.sort(key=lambda x: x.name)
 		#file_entries.sort(key=lambda x: x.name)
@@ -730,16 +724,18 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		normed_dir_relpath = dir_relpath
 		if convert_sep:
 			normed_dir_relpath = normed_dir_relpath.replace("\\", "/")
+			dir_relpath = dir_relpath.replace("\\", "/")
 		if not sftp_compat:
 			normed_dir_relpath = os.path.normcase(normed_dir_relpath)
 
-		# record empty directory
+		# empty directory
 		if dir_relpath != "." and not file_entries and not dir_entries and f.filter(dir_relpath + display_sep):
-			file_list.empty_dirs.add(normed_dir_relpath)
-			if convert_sep:
-				file_list.real_names[normed_dir_relpath] = dir_relpath.replace("\\", "/")
-			else:
-				file_list.real_names[normed_dir_relpath] = dir_relpath
+			yield _ScandirEntry(
+				cat      = "empty_dir",
+				normpath = normed_dir_relpath,
+				path     = dir_relpath,
+				meta     = None,
+			)
 			continue
 		#else:
 		#	self.nonempty_dirs.add(dir_relpath)
@@ -764,6 +760,7 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 			normed_file_relpath = file_relpath
 			if convert_sep:
 				normed_file_relpath = normed_file_relpath.replace("\\", "/")
+				file_relpath = file_relpath.replace("\\", "/")
 			if not sftp_compat:
 				normed_file_relpath = os.path.normcase(normed_file_relpath)
 
@@ -772,19 +769,20 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 				mtime = stat.st_mtime
 				if sftp_compat:
 					mtime = float(int(mtime))
-				meta = _Metadata(size=stat.st_size, mtime=mtime)
-				file_list.relpath_to_meta[normed_file_relpath] = meta
-				if convert_sep:
-					file_list.real_names[normed_file_relpath] = file_relpath.replace("\\", "/")
-				else:
-					file_list.real_names[normed_file_relpath] = file_relpath
 
-	return file_list
+				yield _ScandirEntry(
+					cat      = "file",
+					normpath = normed_file_relpath,
+					path     = file_relpath,
+					meta     = _Metadata(size=stat.st_size, mtime=mtime),
+				)
 
 def _operations(
-		src_files        : _FileList,
-		dst_files        : _FileList,
 		*,
+		src_root         : Path | RemotePath,
+		dst_root         : Path | RemotePath,
+		src_files        , # TODO
+		dst_files        ,
 		trash_root       : Path | RemotePath | None,
 		delete_files     : bool,
 		rename_threshold : int  | None,
@@ -794,13 +792,35 @@ def _operations(
 
 	assert trash_root is None or isinstance(trash_root, (Path, RemotePath))
 
-	display_sep = "/" if isinstance(src_files.root, RemotePath) or isinstance(dst_files.root, RemotePath) else os.sep
+	display_sep = "/" if isinstance(src_root, RemotePath) or isinstance(dst_root, RemotePath) else os.sep
 
-	src_relpath_meta = src_files.relpath_to_meta
-	dst_relpath_meta = dst_files.relpath_to_meta
+	src_real_names = {}
+	dst_real_names = {}
 
-	src_relpaths = set(src_relpath_meta.keys())
-	dst_relpaths = set(dst_relpath_meta.keys())
+	src_meta = {}
+	dst_meta = {}
+
+	src_relpaths = set()
+	dst_relpaths = set()
+
+	src_empty_dirs = set()
+	dst_empty_dirs = set()
+
+	for src_entry in src_files:
+		src_real_names[src_entry.normpath] = src_entry.path
+		src_meta[src_entry.normpath] = src_entry.meta
+		if src_entry.cat == "file":
+			src_relpaths.add(src_entry.normpath)
+		elif src_entry.cat == "empty_dir":
+			src_empty_dirs.add(src_entry.normpath)
+
+	for dst_entry in dst_files:
+		dst_real_names[dst_entry.normpath] = dst_entry.path
+		dst_meta[dst_entry.normpath] = dst_entry.meta
+		if dst_entry.cat == "file":
+			dst_relpaths.add(dst_entry.normpath)
+		elif dst_entry.cat == "empty_dir":
+			dst_empty_dirs.add(dst_entry.normpath)
 
 	logger.debug(f"{len(src_relpaths)=}")
 	logger.debug(f"{len(dst_relpaths)=}")
@@ -809,8 +829,12 @@ def _operations(
 	dst_only_relpaths = sorted(dst_relpaths.difference(src_relpaths))
 	both_relpaths     = sorted(src_relpaths.intersection(dst_relpaths))
 
+#	print(f"{src_only_relpaths=}")
+#	print(f"{dst_only_relpaths=}")
+#	print(f"{both_relpaths=}")
+
 	# Ignore remote files with invalid characters when copying to Windows
-	if os.sep == "\\" and isinstance(src_files.root, RemotePath):
+	if os.sep == "\\" and isinstance(src_root, RemotePath):
 		for path in src_only_relpaths.copy():
 			if os.path.isreserved(path) or "\\" in path:
 				logger.warning(f"Warning: Ignoring remote file with invalid character in name: {path}")
@@ -825,48 +849,48 @@ def _operations(
 	logger.debug(f"{list(islice(both_relpaths, 10))=}")
 
 	# Delete empty directories now in case any new files needs to take their places
-	dst_only_empty_dirs = dst_files.empty_dirs.difference(src_files.empty_dirs)
+	dst_only_empty_dirs = dst_empty_dirs.difference(src_empty_dirs)
 	for relpath in dst_only_empty_dirs:
-		dst_relpath_real = dst_files.real_names[relpath]
-		src = dst_files.root / dst_relpath_real
+		dst_relpath_real = dst_real_names[relpath]
+		src = dst_root / dst_relpath_real
 		assert not any(src.iterdir())
 		yield ("D-", src, None, 0, f"- {dst_relpath_real}{display_sep}")
 
 	# Rename files
 	if rename_threshold is not None:
-		src_only_relpath_from_meta = _reverse_dict({path:src_relpath_meta[path] for path in src_only_relpaths})
-		dst_only_relpath_from_meta = _reverse_dict({path:dst_relpath_meta[path] for path in dst_only_relpaths})
+		src_only_relpath_from_meta = _reverse_dict({path:src_meta[path] for path in src_only_relpaths})
+		dst_only_relpath_from_meta = _reverse_dict({path:dst_meta[path] for path in dst_only_relpaths})
 
 		for dst_relpath in list(dst_only_relpaths): # dst_only_relpaths is changed inside the loop
 			# Ignore small files
-			if dst_relpath_meta[dst_relpath].size < rename_threshold:
+			if dst_meta[dst_relpath].size < rename_threshold:
 				continue
 			try:
-				rename_to = src_only_relpath_from_meta[dst_relpath_meta[dst_relpath]]
+				rename_to = src_only_relpath_from_meta[dst_meta[dst_relpath]]
 				# Ignore if there are multiple candidates
 				if rename_to is None:
 					continue
 
-				rename_from = dst_only_relpath_from_meta[dst_relpath_meta[dst_relpath]]
+				rename_from = dst_only_relpath_from_meta[dst_meta[dst_relpath]]
 				# Ignore if there are multiple candidates
 				if rename_from is None:
 					continue
 
 				# Ignore if last 1kb do not match
 				if not metadata_only:
-					on_dst = dst_files.root / rename_from
-					on_src = src_files.root / rename_to
+					on_dst = dst_root / rename_from
+					on_src = src_root / rename_to
 					if not _last_bytes(on_src) == _last_bytes(on_dst):
 						continue
 
 				src_only_relpaths.remove(rename_to)
 				dst_only_relpaths.remove(rename_from)
 
-				rename_from = dst_files.real_names[rename_from]
-				rename_to = src_files.real_names[rename_to]
+				rename_from = dst_real_names[rename_from]
+				rename_to = src_real_names[rename_to]
 
-				src = dst_files.root / rename_from
-				dst = dst_files.root / rename_to
+				src = dst_root / rename_from
+				dst = dst_root / rename_to
 
 				yield ("R", src, dst, 0, f"R {rename_from} -> {rename_to}")
 
@@ -877,48 +901,48 @@ def _operations(
 	# Delete files
 	if delete_files:
 		for dst_relpath in dst_only_relpaths:
-			dst_relpath_real = dst_files.real_names[dst_relpath]
-			src = dst_files.root / dst_relpath_real
-			byte_diff = -dst_relpath_meta[dst_relpath].size
+			dst_relpath_real = dst_real_names[dst_relpath]
+			src = dst_root / dst_relpath_real
+			byte_diff = -dst_meta[dst_relpath].size
 			yield ("-", src, None, byte_diff, f"- {dst_relpath_real}")
 
 	# Send files to trash
 	elif trash_root is not None:
 		for dst_relpath in dst_only_relpaths:
-			dst_relpath_real = dst_files.real_names[dst_relpath]
-			src = dst_files.root / dst_relpath_real
+			dst_relpath_real = dst_real_names[dst_relpath]
+			src = dst_root / dst_relpath_real
 			dst = trash_root     / dst_relpath_real
-			#byte_diff = -dst_relpath_meta[dst_relpath].size
+			#byte_diff = -dst_meta[dst_relpath].size
 			byte_diff = 0
 			yield ("~", src, dst, byte_diff, f"~ {dst_relpath_real}")
 
 	# Create files
 	for src_relpath in src_only_relpaths:
-		src_relpath_real = src_files.real_names[src_relpath]
-		src = src_files.root / src_relpath_real
-		dst = dst_files.root / src_relpath_real
-		byte_diff = src_relpath_meta[src_relpath].size
+		src_relpath_real = src_real_names[src_relpath]
+		src = src_root / src_relpath_real
+		dst = dst_root / src_relpath_real
+		byte_diff = src_meta[src_relpath].size
 		yield ("+", src, dst, byte_diff, f"+ {src_relpath_real}")
 
 	# Update files that have newer mtimes
 	for relpath in both_relpaths:
-		src_relpath_real = src_files.real_names[relpath]
-		dst_relpath_real = dst_files.real_names[relpath]
-		src = src_files.root / src_relpath_real
-		dst = dst_files.root / dst_relpath_real
-		byte_diff = src_relpath_meta[relpath].size - dst_relpath_meta[relpath].size
-		src_time = src_relpath_meta[relpath].mtime
-		dst_time = dst_relpath_meta[relpath].mtime
+		src_relpath_real = src_real_names[relpath]
+		dst_relpath_real = dst_real_names[relpath]
+		src = src_root / src_relpath_real
+		dst = dst_root / dst_relpath_real
+		byte_diff = src_meta[relpath].size - dst_meta[relpath].size
+		src_time = src_meta[relpath].mtime
+		dst_time = dst_meta[relpath].mtime
 		if src_time > dst_time:
 			yield ("U", src, dst, byte_diff, f"U {dst_relpath_real}")
 		elif src_time < dst_time:
 			logger.warning(f"Working copy is older than backed-up copy, skipping update: {relpath}")
 
 	# Create empty directories
-	src_only_empty_dirs = src_files.empty_dirs.difference(dst_files.empty_dirs)#.difference(dst_files.nonempty_dirs)
+	src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
 	for relpath in src_only_empty_dirs:
-		src_relpath_real = src_files.real_names[relpath]
-		dst = dst_files.root / src_relpath_real
+		src_relpath_real = src_real_names[relpath]
+		dst = dst_root / src_relpath_real
 		yield ("D+", None, dst, 0, f"+ {src_relpath_real}{display_sep}")
 
 def _reverse_dict(old_dict:dict[Any, Any]) -> dict[Any, Any]:

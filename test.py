@@ -446,6 +446,7 @@ class TestBackup(unittest.TestCase):
 				dst_files        = b_files,
 				trash_root       = Path("/"),
 				delete_files     = False,
+				force_update     = False,
 				rename_threshold = 0,
 				metadata_only    = True,
 			))
@@ -478,6 +479,7 @@ class TestBackup(unittest.TestCase):
 				dst_files        = c_files,
 				trash_root       = Path("/"),
 				delete_files     = False,
+				force_update     = False,
 				rename_threshold = 1000,
 				metadata_only    = True,
 			))

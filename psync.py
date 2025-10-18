@@ -66,6 +66,7 @@ class _ArgParser:
 	extra_handling.add_argument("-t", "--trash", metavar="path", nargs="?", type=str, default=None, const="auto", help="The root directory to move 'extra' files (those that are in `dst` but not `src`). Must be on the same file system as `dst`. If set to \"auto\", then a directory will automatically be made next to `dst`. Extra files will not be moved if this option is omitted.")
 	extra_handling.add_argument("-x", "--delete-files", action="store_true", default=False, help="Permanently delete 'extra' files (those that are in `dst` but not `src`).")
 
+	parser.add_argument("-F", "--force-update", action="store_true", default=False, help="Replace any newer files in `dst` with older copies in `src`.")
 	parser.add_argument("-f", "--filter", metavar="filter_string", nargs="+", type=str, default="+ **/*/ **/*", help="The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with \"/\" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to \"+ **/*/ **/*\", which searches all directories and copies all files.)")
 	parser.add_argument("-H", "--ignore-hidden", action="store_true", default=False, help="Skip hidden files by default. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
 	parser.add_argument("-I", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
@@ -311,6 +312,7 @@ def sync(
 		*,
 		trash            : str | os.PathLike[str] | None = None,
 		delete_files     : bool = False,
+		force_update     : bool = False,
 		filter           : str  = "+ **/*/ **/*",
 		ignore_hidden    : bool = False,
 		ignore_case      : bool = False,
@@ -331,13 +333,13 @@ def sync(
 		dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
 		trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
 		delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst_root` but not `src_root`). Mutually exclusive with `trash`. (Defaults to `False`.)
-
+		force_update      (bool) : Whether to replace any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
 		filter             (str) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to "+ **/*/ **/*", which searches all directories and copies all files.)
 		ignore_hidden     (bool) : Whether to skip hidden files by default. If `True`, then wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., "**/.*") will still match these file system entries. (Defaults to `False`.)
 		ignore_case       (bool) : Whether to ignore case when comparing files to the filter string. (Defaults to `False`.)
 		follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. (Defaults to `False`.)
 		rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
-		metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. Otherwise, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
+		metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
 		dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
 
 		log    (str or PathLike) : The path of the log file to use. It will be created if it does not exist. A value of "auto" means a tempfile will be used for the log, and it will be copied to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
@@ -557,6 +559,7 @@ def sync(
 			dst_files        = dst_files,
 			trash_root       = trash_root,
 			delete_files     = delete_files,
+			force_update     = force_update,
 			rename_threshold = rename_threshold,
 			metadata_only    = metadata_only,
 		):
@@ -785,6 +788,7 @@ def _operations(
 		dst_files        ,
 		trash_root       : Path | RemotePath | None,
 		delete_files     : bool,
+		force_update     : bool,
 		rename_threshold : int  | None,
 		metadata_only    : bool,
 	):
@@ -936,7 +940,10 @@ def _operations(
 		if src_time > dst_time:
 			yield ("U", src, dst, byte_diff, f"U {dst_relpath_real}")
 		elif src_time < dst_time:
-			logger.warning(f"Working copy is older than backed-up copy, skipping update: {relpath}")
+			if force_update:
+				yield ("U", src, dst, byte_diff, f"U {dst_relpath_real}")
+			else:
+				logger.warning(f"Working copy is older than backed-up copy, skipping update: {relpath}")
 
 	# Create empty directories
 	src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)

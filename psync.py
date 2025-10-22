@@ -25,7 +25,18 @@ from sftp import RemotePath, _RemotePathScanner
 
 logger = logging.getLogger("psync")
 
-class _CustomLevelFormatter(logging.Formatter):
+
+class _DebugInfoFilter(logging.Filter):
+	'''Logging filter that only allows DEBUG and INFO records to pass.'''
+	def filter(self, record):
+		return logging.DEBUG <= record.levelno <= logging.INFO
+
+class _NonEmptyFilter(logging.Filter):
+    '''Logging filter that only allows non-empty messages.'''
+    def filter(self, record):
+        return bool(str(record.msg).strip())
+
+class _LogFileFormatter(logging.Formatter):
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 	BASE_FORMAT = "%(message)s"
 
@@ -45,14 +56,7 @@ class _CustomLevelFormatter(logging.Formatter):
 		elif record.levelno == logging.CRITICAL:
 			record.msg = f"\n*** {original_message} ***\n"
 		formatted_message = super().format(record)
-		record.msg = original_message
 		return formatted_message
-
-class _DebugInfoFilter(logging.Filter):
-	'''Logging filter that only allows DEBUG and INFO records to pass.'''
-
-	def filter(self, record):
-		return logging.DEBUG <= record.levelno <= logging.INFO
 
 class _ArgParser:
 	'''Argument parser for when this python file is run with arguments instead of an imported module.'''
@@ -474,11 +478,6 @@ def sync(
 		handler_stderr.setLevel(logging.WARNING)
 		logger.addHandler(handler_stderr)
 
-	width = max(len(str(src)), len(str(dst))) + 3
-	logger.info("   " + str(src))
-	logger.info("-> " + str(dst))
-	logger.info("-" * width)
-
 	try:
 		if not isinstance(src, (str, os.PathLike)):
 			raise TypeError(f"Bad type for arg 'src' (expected str or PathLike): {src}")
@@ -504,6 +503,40 @@ def sync(
 			raise TypeError(f"Bad type for arg 'quiet' (expected bool): {quiet}")
 		if not isinstance(veryquiet, bool):
 			raise TypeError(f"Bad type for arg 'veryquiet' (expected bool): {veryquiet}")
+
+		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+		if log is None:
+			log_file = None
+		elif log == "auto":
+			log_file = Path.home() / f"psync_{timestamp}.log"
+		else:
+			log_file = Path(log)
+		results.log_file = log_file
+
+		tmp_log_file = None
+		if log_file is not None:
+			if log_file.exists():
+				if not log_file.is_file():
+					raise _InputError(f"'log' is not a file: {log_file}")
+				tmp_log_file = log_file
+			else:
+				with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as tmp_log:
+					tmp_log_file = Path(tmp_log.name)
+			#formatter = logging.Formatter("%(levelname)s: %(message)s")
+			handler_file = logging.FileHandler(tmp_log_file, encoding="utf-8")
+			handler_file.setFormatter(_LogFileFormatter())
+			handler_file.addFilter(_NonEmptyFilter())
+			#if debug:
+			handler_file.setLevel(logging.DEBUG)
+			#else:
+			#	handler_file.setLevel(logging.INFO)
+			logger.addHandler(handler_file)
+
+		width = max(len(str(src)), len(str(dst))) + 3
+		logger.info("   " + str(src))
+		logger.info("-> " + str(dst))
+		logger.info("-" * width)
 
 		src = str(src)
 		dst = str(dst)
@@ -532,7 +565,6 @@ def sync(
 			dst = os.path.expandvars(dst)
 			dst_root = Path(dst)
 
-		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 		if trash is None:
 			trash_root = None
 		elif trash == "auto":
@@ -571,32 +603,6 @@ def sync(
 
 		if rename_threshold is not None and rename_threshold < 0:
 			raise _InputError(f"'rename_threshold' must be non-negative: {rename_threshold}")
-
-		if log is None:
-			log_file = None
-		elif log == "auto":
-			log_file = Path.home() / f"psync_{timestamp}.log"
-		else:
-			log_file = Path(log)
-		results.log_file = log_file
-
-		if log_file is not None and log_file.exists():
-			msg = f"'log' already exists: {log_file}"
-			raise _InputError(msg)
-
-		tmp_log_file = None
-		if log_file is not None:
-			with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as tmp_log:
-				tmp_log_file = Path(tmp_log.name)
-			#formatter = logging.Formatter("%(levelname)s: %(message)s")
-			formatter = _CustomLevelFormatter()
-			handler_file = logging.FileHandler(tmp_log_file, encoding="utf-8")
-			handler_file.setFormatter(formatter)
-			if debug:
-				handler_file.setLevel(logging.DEBUG)
-			else:
-				handler_file.setLevel(logging.INFO)
-			logger.addHandler(handler_file)
 
 		sftp_compat = isinstance(src_root, RemotePath) or isinstance(dst_root, RemotePath)
 		filter = filter.replace("\\", "/") if sftp_compat and os.sep == "\\" else filter
@@ -705,15 +711,15 @@ def sync(
 	except KeyboardInterrupt:
 		results.status = Results.Status.INTERRUPTED_BY_USER
 	except _InputError as e:
-		logger.critical("")
+		logger.info("")
 		logger.critical(f"Input Error: {e}", exc_info=debug)
 		results.status = Results.Status.INPUT_ERROR
 	except ConnectionError as e:
-		logger.critical("")
+		logger.info("")
 		logger.critical(f"Connection Error: {e}", exc_info=debug)
 		results.status = Results.Status.CONNECTION_ERROR
 	except Exception as e:
-		logger.critical("")
+		logger.info("")
 		logger.critical("An unexpected error occurred.", exc_info=True)
 		results.status = Results.Status.INTERRUPTED_BY_ERROR
 	finally:

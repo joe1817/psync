@@ -45,28 +45,42 @@ def hash_directory(root:Path, *, follow_links:bool=False, ignore_empty_dirs:bool
 		print("--- Hash End ---")
 	return hasher.hexdigest()
 
-def create_file_structure(root_dir:Path, structure:dict, *, _delay:float = 0.01):
+def create_file_structure(root_dir:Path, structure:dict, *, _symlinks:dict|None = None, _delay:float = 0.01):
 	'''Recursively creates a directory structure with files.'''
 	root_dir.mkdir(parents=True, exist_ok=True)
+	if _symlinks is not None:
+		symlinks = _symlinks
+	else:
+		symlinks = {}
 	for name, content in structure.items():
 		file_path = root_dir / name
 		if isinstance(content, Path):
 			# create symlink
-			os.symlink(content, file_path)
+			symlinks[file_path] = content
 		elif isinstance(content, dict):
 			# create dir
-			create_file_structure(file_path, content, _delay=0)
+			create_file_structure(file_path, content, _symlinks=symlinks, _delay=0)
 		elif isinstance(content, (tuple, list)):
 			# Create file with modtime and content
 			file_path.write_text(content[0] or "")
 			mtime = float(content[1])
 			os.utime(file_path, (mtime, mtime))
+			assert os.stat(file_path).st_mtime == mtime
+			# Force the OS to write all metadata changes (including mtime) to disk
+			#with open(file_path, "r+") as f:
+			#	f.flush()
+			#	os.fsync(f.fileno())
 		elif content is None:
 			# Create an empty file
 			file_path.touch()
 		else:
 			# Create a file with content
 			file_path.write_text(content)
+	# On Windows, symlink type will be assumed to be "File" if the target does not exist
+	# So, create symlinks after everything else
+	if _symlinks is None:
+		for path, target in symlinks.items():
+			os.symlink(target, path)
 	if _delay:
 		# delay so filesystem cache can update (changes to modtimes), TODO not sure if this actually works
 		time.sleep(_delay)
@@ -253,7 +267,7 @@ class TestBackup(unittest.TestCase):
 
 	def test_scandir(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
-			test_root = Path(temp_root)
+			root = Path(temp_root)
 			file_structure = {
 				"a": {
 					"aa": {
@@ -315,10 +329,10 @@ class TestBackup(unittest.TestCase):
 					"cc": {},
 				},
 			}
-			create_file_structure(test_root, file_structure)
+			create_file_structure(root, file_structure)
 
 			files = psync._scandir(
-				root = test_root,
+				root = root,
 				filter = "- b/ c/ + **/*/ **/1.???"
 			)
 			files_expected = [
@@ -337,7 +351,7 @@ class TestBackup(unittest.TestCase):
 			################################################################################
 
 			files = psync._scandir(
-				root = test_root,
+				root = root,
 				filter = "+ a/a?/a?b/*",
 			)
 			files_expected = [
@@ -353,31 +367,37 @@ class TestBackup(unittest.TestCase):
 			################################################################################
 
 			file_structure = {
+				"d": root / "e",
+				"e": {
+					"1.txt": None,
+					"2.txt": Path("./1.txt"),
+					"3.txt": root / "e" / "1.txt",
+					"ea": root / "f",
+					"eb": Path("../f"),
+				},
 				"f": {
 					"1.txt": None,
-					"2.txt": None,
+					"2.txt":  root / "f" / "1.txt",
 				},
-				"e": {
+				"g": {
 					"1.txt": None,
-					"2.txt": None,
+					"circular": root / "g",
 				},
 			}
-			create_file_structure(test_root, file_structure)
-			file_structure = {
-				"e": {
-					"ea": test_root / "f",
-				},
-				"d": test_root / "e",
-			}
-			create_file_structure(test_root, file_structure)
+			create_file_structure(root, file_structure)
 
 			files = psync._scandir(
-				root = test_root / "d",
+				root = root / "d",
 				filter = "+ **/*/ **/*",
+				ignore_symlinks = False,
+				follow_symlinks = False,
 			)
 			files_expected = [
 				"1.txt",
 				"2.txt",
+				"3.txt",
+				"ea",
+				"eb",
 			]
 			self.assertEqual(
 				sorted(f.normpath for f in files),
@@ -387,15 +407,48 @@ class TestBackup(unittest.TestCase):
 			################################################################################
 
 			files = psync._scandir(
-				root = test_root / "d",
+				root = root / "d",
 				filter = "+ **/*/ **/*",
 				follow_symlinks = True,
 			)
 			files_expected = [
 				"1.txt",
 				"2.txt",
+				"3.txt",
 				"ea/1.txt",
 				"ea/2.txt",
+				"eb/1.txt",
+				"eb/2.txt",
+			]
+			self.assertEqual(
+				sorted(f.normpath for f in files),
+				sorted(f.replace("/", os.sep) for f in files_expected)
+			)
+
+			################################################################################
+
+			files = psync._scandir(
+				root = root / "g",
+				filter = "+ **/*/ **/*",
+				follow_symlinks = True,
+			)
+			files_expected = [
+				"1.txt",
+			]
+			self.assertEqual(
+				sorted(f.normpath for f in files),
+				sorted(f.replace("/", os.sep) for f in files_expected)
+			)
+
+			################################################################################
+
+			files = psync._scandir(
+				root = root / "d",
+				filter = "+ **/*/ **/*",
+				ignore_symlinks = True,
+			)
+			files_expected = [
+				"1.txt",
 			]
 			self.assertEqual(
 				sorted(f.normpath for f in files),
@@ -406,7 +459,7 @@ class TestBackup(unittest.TestCase):
 
 	def test_operations(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
-			test_root = Path(temp_root)
+			root = Path(temp_root)
 			file_structure = {
 				"a": {
 					"a": {
@@ -415,7 +468,7 @@ class TestBackup(unittest.TestCase):
 				},
 				"b": {
 					"A": {
-						"1.txt": None
+						"1.txt": (None, 0)
 					},
 					"empty": {
 						"empty2": {
@@ -428,10 +481,10 @@ class TestBackup(unittest.TestCase):
 					},
 				},
 			}
-			create_file_structure(test_root, file_structure)
+			create_file_structure(root, file_structure)
 
-			a_root = test_root / "a"
-			b_root = test_root / "b"
+			a_root = root / "a"
+			b_root = root / "b"
 			a_files = psync._scandir(
 				root = a_root
 			)
@@ -439,7 +492,7 @@ class TestBackup(unittest.TestCase):
 				root = b_root
 			)
 
-			actual = list(x[4] for x in psync._operations(
+			actual = list(op.summary for op in psync._operations(
 				src_root         = a_root,
 				dst_root         = b_root,
 				src_files        = a_files,
@@ -447,32 +500,33 @@ class TestBackup(unittest.TestCase):
 				trash_root       = Path("/"),
 				delete_files     = False,
 				force_update     = False,
-				rename_threshold = 0,
 				metadata_only    = True,
+				rename_threshold = 0,
 			))
 
 			if "nt" in os.name:
 				expected = [
-					f"- {os.path.join('empty','empty2') + os.sep}"
+					f"- {os.path.join('empty', 'empty2') + os.sep}",
+					f"U {os.path.join('A', '1.txt')}",
 				]
 			else:
 				expected = [
-					f"R {os.path.join('a','1.txt')} -> {os.path.join('A','1.txt')}"
-					f"- {os.path.join('empty','empty2') + os.sep}"
+					f"R {os.path.join('a', '1.txt')} -> {os.path.join('A', '1.txt')}",
+					f"- {os.path.join('empty', 'empty2') + os.sep}"
 				]
 			self.assertEqual(actual, expected)
 
 			################################################################################
 
-			a_root = test_root / "a"
-			c_root = test_root / "c"
+			a_root = root / "a"
+			c_root = root / "c"
 			a_files = psync._scandir(
 				root = a_root
 			)
 			c_files = psync._scandir(
 				root = c_root
 			)
-			actual = list(x[4] for x in psync._operations(
+			actual = list(op.summary for op in psync._operations(
 				src_root         = a_root,
 				dst_root         = c_root,
 				src_files        = a_files,
@@ -480,12 +534,12 @@ class TestBackup(unittest.TestCase):
 				trash_root       = Path("/"),
 				delete_files     = False,
 				force_update     = False,
-				rename_threshold = 1000,
 				metadata_only    = True,
+				rename_threshold = 1000,
 			))
 			expected = [
-				f"~ {os.path.join('aa','1.txt')}",
-				f"+ {os.path.join('a','1.txt')}"
+				f"~ {os.path.join('aa', '1.txt')}",
+				f"+ {os.path.join('a', '1.txt')}"
 			]
 			self.assertEqual(actual, expected)
 
@@ -493,7 +547,7 @@ class TestBackup(unittest.TestCase):
 
 	def test_move(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
-			test_root = Path(temp_root)
+			root = Path(temp_root)
 			file_structure = {
 				"a": {
 					"a": {
@@ -501,33 +555,33 @@ class TestBackup(unittest.TestCase):
 					}
 				}
 			}
-			create_file_structure(test_root, file_structure)
+			create_file_structure(root, file_structure)
 
-			src = test_root / "a" / "a" / "1.txt"
-			dst = test_root / "b" / "b" / "2.txt"
+			src = root / "a" / "a" / "1.txt"
+			dst = root / "b" / "b" / "2.txt"
 			psync._move(src, dst)
-			self.assertEqual(os.listdir(test_root / "a" / "a"), [])
-			self.assertEqual(os.listdir(test_root / "b" / "b"), ["2.txt"])
+			self.assertEqual(os.listdir(root / "a" / "a"), [])
+			self.assertEqual(os.listdir(root / "b" / "b"), ["2.txt"])
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_backup(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
-			test_root = Path(temp_root)
+			root = Path(temp_root)
 			file_structure = {
 				"src": {
 					"a": {
-						"a": {
-							"1.txt": None,
+						"aa": {
+							"aa1.txt": None,
 						},
-						"1.txt": "new info",
-						"2.txt": None,
+						"a1.txt": "new info",
+						"a2.txt": None,
 					},
 					"b": {
-						"1.txt": None,
+						"b1.txt": None,
 					},
 					"empty": {
-						"empty": {
+						"empty-empty": {
 						},
 					},
 					"empty2": {
@@ -535,33 +589,33 @@ class TestBackup(unittest.TestCase):
 				},
 				"dst": {
 					"A": {
-						"1.txt": ("old info", 1),
-						"3.txt": None,
+						"A1.txt": ("old info", 1),
+						"A3.txt": None,
 					},
 					"Empty": {
-						"empty": {
+						"Empty-empty": {
 						},
 					},
 					"empty3": {
-						"empty": {
+						"empty3-empty": {
 						},
 					},
 				},
 				"windows_expected_trash": {
 					"A": {
-						"3.txt": None,
+						"A3.txt": None,
 					},
 				},
 				"linux_expected_trash": {
 					"A": {
-						"1.txt": ("old info", 1),
-						"3.txt": None,
+						"A1.txt": ("old info", 1),
+						"A3.txt": None,
 					},
 				},
 			}
-			create_file_structure(test_root, file_structure)
-			src = test_root / "src"
-			dst = test_root / "dst"
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
 			hash_src_old = hash_directory(src)
 			hash_dst_old = hash_directory(dst)
 
@@ -587,24 +641,24 @@ class TestBackup(unittest.TestCase):
 				trash = "auto",
 				quiet = True
 			)
-			self.assertTrue(results.success)
+			self.assertTrue(results.status == psync.Results.Status.COMPLETED)
 			self.assertFalse(hash_directory(dst) == hash_dst_old)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			if "nt" in os.name:
-				self.assertEqual(hash_directory(results.trash_root), hash_directory(test_root / "windows_expected_trash"))
+				self.assertEqual(hash_directory(results.trash_root), hash_directory(root / "windows_expected_trash"))
 			else:
-				self.assertEqual(hash_directory(results.trash_root), hash_directory(test_root / "linux_expected_trash"))
+				self.assertEqual(hash_directory(results.trash_root), hash_directory(root / "linux_expected_trash"))
 
 			################################################################################
 
 			# test backup with symlink src
 			file_structure = {
-				"src2" : test_root / "src",
+				"src2" : root / "src",
 				"dst2" : {}
 			}
-			create_file_structure(test_root, file_structure)
-			src2 = test_root / "src2"
-			dst2 = test_root / "dst2"
+			create_file_structure(root, file_structure)
+			src2 = root / "src2"
+			dst2 = root / "dst2"
 			hash_dst2_old = hash_directory(dst2)
 			results = psync.sync(
 				src2,
@@ -614,13 +668,13 @@ class TestBackup(unittest.TestCase):
 			self.assertFalse(hash_directory(dst2) == hash_dst2_old)
 			self.assertEqual(hash_directory(src2), hash_directory(dst2))
 			self.assertEqual(results.create_success, 4)
-		assert not test_root.exists()
+		assert not root.exists()
 
 		################################################################################
 
 		# test backup involving many overlapping file names
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
-			test_root = Path(temp_root)
+			root = Path(temp_root)
 			file_structure = {
 				"dst": {
 					"a1": {
@@ -661,9 +715,9 @@ class TestBackup(unittest.TestCase):
 					"c3": None,
 				},
 			}
-			create_file_structure(test_root, file_structure)
-			src = test_root / "src"
-			dst = test_root / "dst"
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
 			results = psync.sync(
 				src,
 				dst,

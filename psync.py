@@ -4,20 +4,24 @@
 import sys
 import os
 import re
-import glob
 import stat
 import shutil
 import argparse
 import logging
 import tempfile
 import traceback
+from pathlib import Path
 from itertools import islice
 from datetime import datetime
-from pathlib import Path
-from typing import NamedTuple, Any
+from dataclasses import dataclass, field
+from typing import Any, Literal, Final, Iterator
 
-import custom_walk
-from sftp import RemotePath
+if sys.version_info >= (3, 13):
+	import glob
+else:
+	import glob2 as glob
+
+from sftp import RemotePath, RemotePathScanner
 
 logger = logging.getLogger("psync")
 
@@ -25,7 +29,7 @@ class _CustomLevelFormatter(logging.Formatter):
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 	BASE_FORMAT = "%(message)s"
 
-	def __init__(self, fmt=BASE_FORMAT, datefmt=None, style='%'):
+	def __init__(self, fmt=BASE_FORMAT, datefmt=None, style="%"):
 		super().__init__(fmt, datefmt, style)
 
 	def format(self, record):
@@ -62,17 +66,22 @@ class _ArgParser:
 	parser.add_argument("src", help="The root directory to copy files from.")
 	parser.add_argument("dst", help="The root directory to copy files to.")
 
+	parser.add_argument("-f", "--filter", metavar="filter_string", nargs="+", type=str, default="+ **/*/ **/*", help="The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with \"/\" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to \"+ **/*/ **/*\", which searches all directories and copies all files.)")
+	parser.add_argument("-H", "--ignore-hidden", action="store_true", default=False, help="Ignore hidden files by default in glob patterns. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
+	parser.add_argument("-I", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
+
+	symlink_handling = parser.add_mutually_exclusive_group()
+	symlink_handling.add_argument("-L", "--ignore-symlinks", action="store_true", default=False, help="Ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this flag.")
+	symlink_handling.add_argument("--follow-symlinks", action="store_true", default=False, help="Follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this flag.")
+
 	extra_handling = parser.add_mutually_exclusive_group()
 	extra_handling.add_argument("-t", "--trash", metavar="path", nargs="?", type=str, default=None, const="auto", help="The root directory to move 'extra' files (those that are in `dst` but not `src`). Must be on the same file system as `dst`. If set to \"auto\", then a directory will automatically be made next to `dst`. Extra files will not be moved if this option is omitted.")
 	extra_handling.add_argument("-x", "--delete-files", action="store_true", default=False, help="Permanently delete 'extra' files (those that are in `dst` but not `src`).")
 
 	parser.add_argument("-F", "--force-update", action="store_true", default=False, help="Replace any newer files in `dst` with older copies in `src`.")
-	parser.add_argument("-f", "--filter", metavar="filter_string", nargs="+", type=str, default="+ **/*/ **/*", help="The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with \"/\" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to \"+ **/*/ **/*\", which searches all directories and copies all files.)")
-	parser.add_argument("-H", "--ignore-hidden", action="store_true", default=False, help="Skip hidden files by default. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
-	parser.add_argument("-I", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
-	parser.add_argument("-L", "--follow-symlinks", action="store_true", default=False, help="Follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this flag.")
-	parser.add_argument("-R", "--rename-threshold", metavar="size", nargs=1, type=int, default=10000, help="The minimum size in bytes needed to consider renaming files in dst to match those in `src`. Renamed files below this threshold will be simply deleted in dst and their replacements copied over.")
 	parser.add_argument("-m", "--metadata_only", action="store_true", default=False, help="Use only metadata in determining which files in `dst` are the result of a rename. Otherwise, the backup process will also compare the last 1kb of files.")
+	parser.add_argument("-R", "--rename-threshold", metavar="size", nargs=1, type=int, default=10000, help="The minimum size in bytes needed to consider renaming files in dst to match those in `src`. Renamed files below this threshold will be simply deleted in dst and their replacements copied over.")
+
 	parser.add_argument("-d", "--dry-run", action="store_true", default=False, help="Forgo performing any operation that would make a file system change. Changes that would have occurred will still be printed to console.")
 
 	parser.add_argument("--log", metavar="path", nargs="?", type=str, default=None, const="auto", help="The path of the log file to use. It will be created if it does not exist. With \"auto\" or no argument, a tempfile will be used for the log, and it will be moved to the user's home directory after the backup is done. If this flag is absent, then no logging will be performed.")
@@ -86,6 +95,10 @@ class _ArgParser:
 		parsed_args.veryquiet = parsed_args.q >= 2
 		del parsed_args.q
 		return parsed_args
+
+class _InputError(ValueError):
+	''' Error that indicates the root cause was due to bad input and that a stack trace does not need to be logged. '''
+	pass
 
 class _Filter:
 	'''Object that holds a parsed filter string for quicker file filtering.'''
@@ -237,53 +250,93 @@ class _Filter:
 				return action
 		return default
 
-class _Metadata(NamedTuple):
+@dataclass(frozen=True)
+class _Metadata:
 	'''File metadata that will be used to find probable duplicates.'''
 
 	size  : int
 	mtime : float
 
-class _ScandirEntry(NamedTuple):
+@dataclass(frozen=True)
+class _ScandirEntry:
 	'''Filesystem entries yielded by `_scandir()`.'''
 
-	cat      : str # file, empty_dir
-	normpath : str # normcase'd
+	class Category:
+		EMPTY_DIR : Final[str] = "Empty Dir"
+		FILE      : Final[str] = "File"
+
+	# mypy gives an error for some reason
+	#category : Literal[Category.EMPTY_DIR, Category.FILE]
+	category : str
+	normpath : str # normcased and replaced \\ -> /
 	path     : str
-	meta     : _Metadata
+	meta     : _Metadata # TODO: _Metadata | None
 
-class _InputError(ValueError):
-	''' Error that indicates the root cause was due to bad input and that a stack trace does not need to be logged. '''
+@dataclass(frozen=True)
+class _Operation:
+	'''Filesystem operation yielded by `_operations()`.'''
 
-	pass
+	class Category:
+		CREATE_FILE : Final[str] = "+"
+		UPDATE_FILE : Final[str] = "U"
+		RENAME_FILE : Final[str] = "R"
+		DELETE_FILE : Final[str] = "-"
+		TRASH_FILE  : Final[str] = "~"
 
+		CREATE_DIR : Final[str] = "D+"
+		DELETE_DIR : Final[str] = "D-"
+
+	# mypy gives an error for some reason
+	#category  : Literal[Category.CREATE_FILE, Category.UPDATE_FILE, Category.RENAME_FILE, Category.DELETE_FILE, Category.TRASH_FILE, Category.CREATE_DIR, Category.DELETE_DIR]
+	category  : str
+	src       : Path | RemotePath | None
+	dst       : Path | RemotePath | None
+	byte_diff : int
+	summary   : str
+
+@dataclass
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
 
-	def __init__(self) -> None:
-		self.trash_root : Path | RemotePath | None = None
-		self.log_file   : Path | None = None
+	class Status:
+		PENDING              : Final[str] = "Pending"
+		COMPLETED            : Final[str] = "Completed"
+		INPUT_ERROR          : Final[str] = "Input Error"
+		CONNECTION_ERROR     : Final[str] = "Connection Error"
+		INTERRUPTED_BY_USER  : Final[str] = "Interrupted by User"
+		INTERRUPTED_BY_ERROR : Final[str] = "Interrupted by Error"
 
-		self.success    : bool        = False
-		self.errors     : list[str]   = []
+	trash_root : Path | RemotePath | None = None
+	log_file   : Path | RemotePath | None = None
 
-		self.create_success = 0
-		self.rename_success = 0
-		self.update_success = 0
-		self.delete_success = 0
-		self.create_error = 0
-		self.rename_error = 0
-		self.update_error = 0
-		self.delete_error = 0
-		self.byte_diff = 0
+	# mypy gives an error for some reason
+	#status     : Literal[Status.PENDING, Status.COMPLETED, Status.INPUT_ERROR, Status.CONNECTION_ERROR, Status.INTERRUPTED_BY_USER, Status.INTERRUPTED_BY_ERROR] = Status.PENDING
+	status     : str = Status.PENDING
+	errors     : list[str] = field(default_factory=list)
 
-		self.dir_create_success = 0
-		self.dir_create_error   = 0
-		self.dir_delete_success = 0
-		self.dir_delete_error   = 0
+	rename_success : int = 0
+	delete_success : int = 0
+	trash_success  : int = 0
+	create_success : int = 0
+	update_success : int = 0
+
+	rename_error : int   = 0
+	delete_error : int   = 0
+	trash_error  : int   = 0
+	create_error : int   = 0
+	update_error : int   = 0
+
+	byte_diff : int      = 0
+
+	dir_delete_success : int = 0
+	dir_create_success : int = 0
+
+	dir_delete_error : int   = 0
+	dir_create_error : int   = 0
 
 	@property
 	def err_count(self) -> int:
-		return self.create_error + self.rename_error + self.update_error + self.delete_error + self.dir_create_error + self.dir_delete_error
+		return self.rename_error + self.delete_error + self.trash_error + self.create_error + self.update_error + self.dir_delete_error + self.dir_create_error
 
 def sync_cmd(args:list[str]) -> Results:
 	'''Run `sync()` with command line arguments.'''
@@ -292,14 +345,21 @@ def sync_cmd(args:list[str]) -> Results:
 	return sync(
 		parsed_args.src,
 		parsed_args.dst,
-		trash            = parsed_args.trash,
-		delete_files     = parsed_args.delete_files,
+
 		filter           = parsed_args.filter if isinstance(parsed_args.filter, str) else " ".join(parsed_args.filter),
 		ignore_hidden    = parsed_args.ignore_hidden,
 		ignore_case      = parsed_args.ignore_case,
-		rename_threshold = parsed_args.rename_threshold,
+		ignore_symlinks  = parsed_args.ignore_symlinks,
+		follow_symlinks  = parsed_args.follow_symlinks,
+
+		trash            = parsed_args.trash,
+		delete_files     = parsed_args.delete_files,
+		force_update     = parsed_args.force_update,
 		metadata_only    = parsed_args.metadata_only,
+		rename_threshold = parsed_args.rename_threshold,
+
 		dry_run          = parsed_args.dry_run,
+
 		log              = parsed_args.log,
 		debug            = parsed_args.debug,
 		quiet            = parsed_args.quiet,
@@ -310,16 +370,21 @@ def sync(
 		src              : str | os.PathLike[str],
 		dst              : str | os.PathLike[str],
 		*,
-		trash            : str | os.PathLike[str] | None = None,
-		delete_files     : bool = False,
-		force_update     : bool = False,
+
 		filter           : str  = "+ **/*/ **/*",
 		ignore_hidden    : bool = False,
 		ignore_case      : bool = False,
+		ignore_symlinks  : bool = False,
 		follow_symlinks  : bool = False,
-		rename_threshold : int | None  = 10000,
+
+		trash            : str | os.PathLike[str] | None = None,
+		delete_files     : bool = False,
+		force_update     : bool = False,
 		metadata_only    : bool = False,
+		rename_threshold : int | None  = 10000,
+
 		dry_run          : bool = False,
+
 		log              : str | os.PathLike[str] | None = None,
 		debug            : bool = False,
 		quiet            : bool = False,
@@ -331,15 +396,19 @@ def sync(
 	Args
 		src    (str or PathLike) : The path of the root directory to copy files from. Can be a symlink to a directory.
 		dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
+
+		filter             (str) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to "+ **/*/ **/*", which searches all directories and copies all files.)
+		ignore_hidden     (bool) : Whether to ignore hidden files by default in glob patterns. If `True`, then wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., "**/.*") will still match these file system entries. (Defaults to `False`.)
+		ignore_case       (bool) : Whether to ignore case when comparing files to the filter string. (Defaults to `False`.)
+		ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
+		follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
+
 		trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
 		delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst_root` but not `src_root`). Mutually exclusive with `trash`. (Defaults to `False`.)
 		force_update      (bool) : Whether to replace any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
-		filter             (str) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to "+ **/*/ **/*", which searches all directories and copies all files.)
-		ignore_hidden     (bool) : Whether to skip hidden files by default. If `True`, then wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., "**/.*") will still match these file system entries. (Defaults to `False`.)
-		ignore_case       (bool) : Whether to ignore case when comparing files to the filter string. (Defaults to `False`.)
-		follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. (Defaults to `False`.)
-		rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
 		metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
+		rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
+
 		dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
 
 		log    (str or PathLike) : The path of the log file to use. It will be created if it does not exist. A value of "auto" means a tempfile will be used for the log, and it will be copied to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
@@ -353,18 +422,20 @@ def sync(
 		--------------
 		- empty-dir-in-dst/
 		R old-name.txt -> new-name.txt
-		- not-in-src.txt
+		- not-in-src-and-getting-deleted.txt
+		~ not-in-src-and-getting-sent-to-trash.txt
 		+ not-in-dst.txt
 		U updated.txt
 		+ empty-dir-in-src/
 
-		The program ended successfully.
-
-		File Stats (Excluding Dirs)
-		Rename Success: 1
+		Summary
+		-------
+		Status: Completed
 		Create Success: 1
-		Update Success: 0
+		Update Success: 1
+		Rename Success: 1
 		Delete Success: 1
+		»Trash Success: 1
 		Net Change: 0 bytes
 
 		Log file: path/to/log/psync_20251015_201523.log
@@ -403,51 +474,40 @@ def sync(
 		handler_stderr.setLevel(logging.WARNING)
 		logger.addHandler(handler_stderr)
 
+	width = max(len(str(src)), len(str(dst))) + 3
+	logger.info("   " + str(src))
+	logger.info("-> " + str(dst))
+	logger.info("-" * width)
+
 	try:
 		if not isinstance(src, (str, os.PathLike)):
-			msg = f"Bad type for arg 'src' (expected str or PathLike): {src}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'src' (expected str or PathLike): {src}")
 		if not isinstance(dst, (str, os.PathLike)):
-			msg = f"Bad type for arg 'dst' (expected str or PathLike): {dst}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'dst' (expected str or PathLike): {dst}")
 		if trash is not None and not isinstance(trash, (str, os.PathLike)):
-			msg = f"Bad type for arg 'trash' (expected str or PathLike): {trash}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'trash' (expected str or PathLike): {trash}")
 		if not isinstance(delete_files, bool):
-			msg = f"Bad type for arg 'delete_files' (expected bool): {trash}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'delete_files' (expected bool): {trash}")
 		if not isinstance(filter, str):
-			msg = f"Bad type for arg 'filter' (expected str): {filter}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'filter' (expected str): {filter}")
 		if not isinstance(ignore_hidden, bool):
-			msg = f"Bad type for arg 'ignore_hidden' (expected bool): {ignore_hidden}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'ignore_hidden' (expected bool): {ignore_hidden}")
 		if rename_threshold is not None and not isinstance(rename_threshold, int):
-			msg = f"Bad type for arg 'rename_threshold' (expected int): {rename_threshold}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'rename_threshold' (expected int): {rename_threshold}")
 		if not isinstance(metadata_only, bool):
-			msg = f"Bad type for arg 'metadata_only' (expected bool): {metadata_only}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'metadata_only' (expected bool): {metadata_only}")
 		if not isinstance(dry_run, bool):
-			msg = f"Bad type for arg 'dry_run' (expected bool): {dry_run}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'dry_run' (expected bool): {dry_run}")
 		if log is not None and not isinstance(log, (str, os.PathLike)):
-			msg = f"Bad type for arg 'log' (expected str or PathLike): {log}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'log' (expected str or PathLike): {log}")
 		if not isinstance(quiet, bool):
-			msg = f"Bad type for arg 'quiet' (expected bool): {quiet}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'quiet' (expected bool): {quiet}")
 		if not isinstance(veryquiet, bool):
-			msg = f"Bad type for arg 'veryquiet' (expected bool): {veryquiet}"
-			raise TypeError(msg)
+			raise TypeError(f"Bad type for arg 'veryquiet' (expected bool): {veryquiet}")
 
 		src = str(src)
 		dst = str(dst)
 		trash = str(trash) if trash else None
-
-		if trash and delete_files:
-			msg = f"Mutually exclusive flags: 'trash' and 'delete_files'"
-			raise _InputError(msg)
 
 		src_root   : Path|RemotePath
 		dst_root   : Path|RemotePath
@@ -459,6 +519,8 @@ def sync(
 			except (ValueError, ImportError) as e:
 				raise _InputError(str(e)) from e
 		else:
+			src = os.path.expanduser(src)
+			src = os.path.expandvars(src)
 			src_root = Path(src)
 		if "@" in dst:
 			try:
@@ -466,6 +528,8 @@ def sync(
 			except (ValueError, ImportError) as e:
 				raise _InputError(str(e)) from e
 		else:
+			dst = os.path.expanduser(dst)
+			dst = os.path.expandvars(dst)
 			dst_root = Path(dst)
 
 		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -479,21 +543,34 @@ def sync(
 			except (ValueError, ImportError) as e:
 				raise _InputError(str(e)) from e
 		else:
+			trash = os.path.expanduser(trash)
+			trash = os.path.expandvars(trash)
 			trash_root = Path(trash) / timestamp
 		results.trash_root = trash_root
 
-		'''
-		if not dry_run:
-			dst_root.mkdir(exist_ok=True, parents=True)
-			if trash_root is not None:
-				trash_root.mkdir(exist_ok=True, parents=True)
-
-		# This doesn't work over SFTP
-		if trash_root is not None and trash_root.exists():
+		# st_dev is not available over SFTP
+		if trash_root is not None and not isinstance(dst_root, RemotePath) and not isinstance(trash_root, RemotePath) and trash_root.exists():
 			if os.stat(trash_root).st_dev != os.stat(dst_root).st_dev:
-				msg = f"Chosen trash_root is not on the same file system as dst_root: {trash_root}"
-			raise _InputError(msg)
-		'''
+				raise _InputError(f"'trash_root' is not on the same file system as 'dst_root': {trash_root}")
+
+		if src_root.exists() and not src_root.is_dir():
+			raise _InputError(f"'src' is not a directory: {src_root}")
+		if dst_root.exists() and not dst_root.is_dir():
+			raise _InputError(f"'dst' is not a directory: {dst_root}")
+		# This isn't a problem because dirs are walked in their entirety before operations are performed
+		# If this changes in the furture, should also check that src or dst isn't nested in the other
+		#if src_root.resolve() == dst_root.resolve():
+		#	raise _InputError(f"'src' and 'dst' point to the same directory")
+		if trash_root is not None and trash_root.exists() and not trash_root.is_dir():
+			raise _InputError(f"'trash_root' is not a directory: {trash_root}")
+		if trash_root and delete_files:
+			raise _InputError("Mutually exclusive arguments: 'trash_root' and 'delete_files'")
+
+		if ignore_symlinks and follow_symlinks:
+			raise _InputError("Mutually exclusive arguments: 'ignore_symlinks' and 'follow_symlinks'")
+
+		if rename_threshold is not None and rename_threshold < 0:
+			raise _InputError(f"'rename_threshold' must be non-negative: {rename_threshold}")
 
 		if log is None:
 			log_file = None
@@ -503,24 +580,8 @@ def sync(
 			log_file = Path(log)
 		results.log_file = log_file
 
-		if src_root.exists() and not src_root.is_dir():
-			msg = f"Chosen 'src' is not a directory: {src_root}"
-			raise _InputError(msg)
-		if dst_root.exists() and not dst_root.is_dir():
-			msg = f"Chosen 'dst' is not a directory: {dst_root}"
-			raise _InputError(msg)
-		if src_root.resolve() == dst_root.resolve():
-			msg = f"Chosen 'src' and 'dst' point to the same directory"
-			raise _InputError(msg)
-		if trash_root is not None and trash_root.exists() and not trash_root.is_dir():
-			msg = f"Chosen trash_root is not a directory: {trash_root}"
-			raise _InputError(msg)
 		if log_file is not None and log_file.exists():
-			msg = f"Chosen log already exists: {log_file}"
-			raise _InputError(msg)
-
-		if rename_threshold is not None and rename_threshold < 0:
-			msg = f"rename_threshold must be non-negative: {rename_threshold}"
+			msg = f"'log' already exists: {log_file}"
 			raise _InputError(msg)
 
 		tmp_log_file = None
@@ -541,18 +602,18 @@ def sync(
 		filter = filter.replace("\\", "/") if sftp_compat and os.sep == "\\" else filter
 
 		logger.debug("")
-		logger.debug(f"Starting backup: {src_root=} {dst_root=} {trash_root=} {filter=} {ignore_hidden=} {follow_symlinks=} {rename_threshold=} {dry_run=} {log_file=} {debug=} {quiet=} {veryquiet=} {sftp_compat=}")
+		logger.debug(f"Starting backup: {src_root=} {dst_root=} {filter=} {ignore_hidden=} {ignore_case=} {ignore_symlinks=} {follow_symlinks=} {trash_root=} {trash_root=} {delete_files=} {force_update=} {metadata_only=} {rename_threshold=} {dry_run=} {log_file=} {debug=} {quiet=} {veryquiet=} {sftp_compat=}")
 		logger.debug("")
 
-		width = max(len(str(src_root)), len(str(dst_root))) + 3
-		logger.info("   " + str(src_root))
-		logger.info("-> " + str(dst_root))
-		logger.info("-" * width)
+		#width = max(len(str(src_root)), len(str(dst_root))) + 3
+		#logger.info("   " + str(src_root))
+		#logger.info("-> " + str(dst_root))
+		#logger.info("-" * width)
 
-		src_files = _scandir(src_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
-		dst_files = _scandir(dst_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
+		src_files = _scandir(src_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, ignore_symlinks=ignore_symlinks, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
+		dst_files = _scandir(dst_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, ignore_symlinks=ignore_symlinks, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
 
-		for op, src_file, dst_file, byte_diff, summary in _operations(
+		for op in _operations(
 			src_root         = src_root,
 			dst_root         = dst_root,
 			src_files        = src_files,
@@ -563,73 +624,73 @@ def sync(
 			rename_threshold = rename_threshold,
 			metadata_only    = metadata_only,
 		):
-			logger.info(summary)
+			logger.info(op.summary)
 
 			if not dry_run:
-				if op == "-":
+				if op.category == _Operation.Category.RENAME_FILE:
 					try:
-						src_file.unlink()
-						_delete_empty_dirs(src_file.parent, dst_root)
-						results.delete_success += 1
-						results.byte_diff += byte_diff
-					except OSError as e:
-						results.delete_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				if op == "~":
-					try:
-						_move(src_file, dst_file)
-						_delete_empty_dirs(src_file.parent, dst_root)
-						results.delete_success += 1
-						results.byte_diff += byte_diff
-					except OSError as e:
-						results.delete_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op == "+":
-					try:
-						_copy(src_file, dst_file, follow_symlinks=follow_symlinks)
-						results.create_success += 1
-						results.byte_diff += byte_diff
-					except OSError as e:
-						results.create_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op == "U":
-					try:
-						_copy(src_file, dst_file, follow_symlinks=follow_symlinks)
-						results.update_success += 1
-						results.byte_diff += byte_diff
-					except OSError as e:
-						results.update_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op == "R":
-					try:
-						_move(src_file, dst_file)
-						_delete_empty_dirs(src_file.parent, dst_root)
+						_move(op.src, op.dst)
+						_delete_empty_dirs(op.src.parent, dst_root)
 						results.rename_success += 1
 					except OSError as e:
 						results.rename_error += 1
 						msg = "  " + _error_summary(e)
 						logger.error(msg)
 						results.errors.append(msg)
-				elif op == "D+":
+				elif op.category == _Operation.Category.DELETE_FILE:
 					try:
-						dst_file.mkdir(exist_ok=True, parents=True)
+						op.src.unlink()
+						_delete_empty_dirs(op.src.parent, dst_root)
+						results.delete_success += 1
+						results.byte_diff += op.byte_diff
+					except OSError as e:
+						results.delete_error += 1
+						msg = "  " + _error_summary(e)
+						logger.error(msg)
+						results.errors.append(msg)
+				elif op.category == _Operation.Category.TRASH_FILE:
+					try:
+						_move(op.src, op.dst)
+						_delete_empty_dirs(op.src.parent, dst_root)
+						results.delete_success += 1
+						results.byte_diff += op.byte_diff
+					except OSError as e:
+						results.delete_error += 1
+						msg = "  " + _error_summary(e)
+						logger.error(msg)
+						results.errors.append(msg)
+				elif op.category == _Operation.Category.CREATE_FILE:
+					try:
+						_copy(op.src, op.dst, follow_symlinks=follow_symlinks)
+						results.create_success += 1
+						results.byte_diff += op.byte_diff
+					except OSError as e:
+						results.create_error += 1
+						msg = "  " + _error_summary(e)
+						logger.error(msg)
+						results.errors.append(msg)
+				elif op.category == _Operation.Category.UPDATE_FILE:
+					try:
+						_copy(op.src, op.dst, follow_symlinks=follow_symlinks)
+						results.update_success += 1
+						results.byte_diff += op.byte_diff
+					except OSError as e:
+						results.update_error += 1
+						msg = "  " + _error_summary(e)
+						logger.error(msg)
+						results.errors.append(msg)
+				elif op.category == _Operation.Category.CREATE_DIR:
+					try:
+						op.dst.mkdir(exist_ok=True, parents=True)
 						results.dir_create_success += 1
 					except OSError as e:
 						results.dir_create_error += 1
 						msg = "  " + _error_summary(e)
 						logger.error(msg)
 						results.errors.append(msg)
-				elif op == "D-":
+				elif op.category == _Operation.Category.DELETE_DIR:
 					try:
-						_delete_empty_dirs(src_file, dst_root)
+						_delete_empty_dirs(op.src, dst_root)
 						results.dir_delete_success += 1
 					except OSError as e:
 						results.dir_delete_error += 1
@@ -639,31 +700,37 @@ def sync(
 				else:
 					raise RuntimeError(f"Unrecognized operation: {op}")
 
-		logger.info("")
-		logger.info("*** psync finished successfully. ***")
-
-		results.success = True
+		results.status = Results.Status.COMPLETED
 
 	except KeyboardInterrupt:
-		logger.critical(f"Cancelled by user.")
+		results.status = Results.Status.INTERRUPTED_BY_USER
 	except _InputError as e:
+		logger.critical("")
 		logger.critical(f"Input Error: {e}", exc_info=debug)
+		results.status = Results.Status.INPUT_ERROR
+	except ConnectionError as e:
+		logger.critical("")
+		logger.critical(f"Connection Error: {e}", exc_info=debug)
+		results.status = Results.Status.CONNECTION_ERROR
 	except Exception as e:
+		logger.critical("")
 		logger.critical("An unexpected error occurred.", exc_info=True)
-
+		results.status = Results.Status.INTERRUPTED_BY_ERROR
 	finally:
+		logger.info("")
+		logger.info("Summary")
+		logger.info("-------")
 		if dry_run:
-			logger.info("")
-			logger.info("*** DRY RUN ***")
+			logger.info(f"Status: {results.status} (Dry Run)")
 		else:
-			logger.info("")
-			logger.info("Summary")
-			logger.info("-------")
-			logger.info(f"Rename Success: {results.rename_success}" + (f" | Failed: {results.rename_error}" if results.rename_error else ""))
+			logger.info(f"Status: {results.status}")
 			logger.info(f"Create Success: {results.create_success}" + (f" | Failed: {results.create_error}" if results.create_error else ""))
 			logger.info(f"Update Success: {results.update_success}" + (f" | Failed: {results.update_error}" if results.update_error else ""))
+			logger.info(f"Rename Success: {results.rename_success}" + (f" | Failed: {results.rename_error}" if results.rename_error else ""))
 			logger.info(f"Delete Success: {results.delete_success}" + (f" | Failed: {results.delete_error}" if results.delete_error else ""))
+			logger.info(f"»Trash Success: {results.delete_success}" + (f" | Failed: {results.trash_error}"  if results.trash_error  else ""))
 			logger.info(f"Net Change: {_human_readable_size(results.byte_diff)}")
+			logger.info("")
 
 		if results.err_count:
 			logger.info("")
@@ -692,7 +759,7 @@ def sync(
 
 	return results
 
-def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, ignore_case:bool = False, follow_symlinks:bool = False, sftp_compat:bool = False): # -> TODO
+def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, ignore_case:bool = False, ignore_symlinks:bool = False, follow_symlinks:bool = False, sftp_compat:bool = False) -> Iterator[_ScandirEntry]:
 	'''
 	Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.
 
@@ -705,23 +772,13 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		sftp_compat     (bool) : Whether to work in SFTP compatibility mode, which will truncate milliseconds off the file modification times, treat file names case-sensitively on Windows, and return paths with forward slashes. (Defaults to `False`.)
 	'''
 
-	visited_dirs = set()
 	f = _Filter(filter, ignore_hidden=ignore_hidden)
 
 	convert_sep = sftp_compat and os.sep == "\\" and not isinstance(root, RemotePath)
 	display_sep = "/" if sftp_compat else os.sep
 
-	for dir, dir_entries, file_entries in custom_walk.walk(root, followlinks=follow_symlinks):
+	for dir, dir_entries, file_entries in _walk(root, ignore_symlinks=ignore_symlinks, follow_symlinks=follow_symlinks):
 		logger.debug(f"scanning: {dir}")
-
-		if follow_symlinks:
-			d = str(dir.resolve())
-			if d in visited_dirs:
-				raise ValueError(f"Symlink circular reference: {dir}")
-			visited_dirs.add(d)
-
-		#dir_entries.sort(key=lambda x: x.name)
-		#file_entries.sort(key=lambda x: x.name)
 
 		dir_relpath = str(dir.relative_to(root))
 		normed_dir_relpath = dir_relpath
@@ -734,14 +791,12 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		# empty directory
 		if dir_relpath != "." and not file_entries and not dir_entries and f.filter(dir_relpath + display_sep):
 			yield _ScandirEntry(
-				cat      = "empty_dir",
+				category = _ScandirEntry.Category.EMPTY_DIR,
 				normpath = normed_dir_relpath,
 				path     = dir_relpath,
-				meta     = None,
+				meta     = _Metadata(size=0, mtime=-1),
 			)
 			continue
-		#else:
-		#	self.nonempty_dirs.add(dir_relpath)
 
 		# prune search tree
 		i = 0
@@ -774,27 +829,85 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 					mtime = float(int(mtime))
 
 				yield _ScandirEntry(
-					cat      = "file",
+					category = _ScandirEntry.Category.FILE,
 					normpath = normed_file_relpath,
 					path     = file_relpath,
 					meta     = _Metadata(size=stat.st_size, mtime=mtime),
 				)
 
+def _walk(top:Path|RemotePath, *,  ignore_symlinks:bool = False, follow_symlinks:bool = False):
+	stack        : list[Any] = [top]
+	visited_dirs : set[str]  = set()
+
+	assert not isinstance(top, str)
+
+	while stack:
+		top = stack.pop()
+
+		if follow_symlinks:
+			if isinstance(top, str):
+				visited_dirs.remove(top)
+				continue
+			d = str(top.resolve())
+			if d in visited_dirs:
+				logger.warning(f"Symlink circular reference: {top} -> {d}")
+				continue
+			stack.append(d)
+			visited_dirs.add(d)
+
+		assert not isinstance(top, str)
+
+		dirs    = []
+		nondirs = []
+
+		try:
+			scanner = RemotePathScanner(top) if isinstance(top, RemotePath) else os.scandir(top)
+			with scanner as entries:
+				for entry in entries:
+					try:
+						if ignore_symlinks and entry.is_symlink():
+							continue
+						if follow_symlinks:
+							is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+						else:
+							is_dir = entry.is_dir(follow_symlinks=False)
+					except OSError as e:
+						logger.warning(e)
+						continue
+
+					if is_dir:
+						dirs.append(entry)
+					else:
+						nondirs.append(entry)
+		except OSError as e:
+			logger.warning(e)
+			continue
+
+		#dirs.sort(key=lambda x: x.name)
+		#nondirs.sort(key=lambda x: x.name)
+
+		yield top, dirs, nondirs
+
+		# Traverse into sub-directories
+		for dir in reversed(dirs):
+			# in case dir symlink status changed after yield
+			new_path = top / dir.name
+			if follow_symlinks or not new_path.is_symlink():
+				stack.append(new_path)
+
 def _operations(
 		*,
 		src_root         : Path | RemotePath,
 		dst_root         : Path | RemotePath,
-		src_files        , # TODO
-		dst_files        ,
+		src_files        : Iterator[_ScandirEntry],
+		dst_files        : Iterator[_ScandirEntry],
 		trash_root       : Path | RemotePath | None,
 		delete_files     : bool,
 		force_update     : bool,
-		rename_threshold : int  | None,
 		metadata_only    : bool,
+		rename_threshold : int | None,
 	):
 	'''Generator of file system operations to perform for this backup.'''
-
-	assert trash_root is None or isinstance(trash_root, (Path, RemotePath))
 
 	display_sep = "/" if isinstance(src_root, RemotePath) or isinstance(dst_root, RemotePath) else os.sep
 
@@ -813,17 +926,17 @@ def _operations(
 	for src_entry in src_files:
 		src_real_names[src_entry.normpath] = src_entry.path
 		src_meta[src_entry.normpath] = src_entry.meta
-		if src_entry.cat == "file":
+		if src_entry.category == _ScandirEntry.Category.FILE:
 			src_relpaths.add(src_entry.normpath)
-		elif src_entry.cat == "empty_dir":
+		elif src_entry.category == _ScandirEntry.Category.EMPTY_DIR:
 			src_empty_dirs.add(src_entry.normpath)
 
 	for dst_entry in dst_files:
 		dst_real_names[dst_entry.normpath] = dst_entry.path
 		dst_meta[dst_entry.normpath] = dst_entry.meta
-		if dst_entry.cat == "file":
+		if dst_entry.category == _ScandirEntry.Category.FILE:
 			dst_relpaths.add(dst_entry.normpath)
-		elif dst_entry.cat == "empty_dir":
+		elif dst_entry.category == _ScandirEntry.Category.EMPTY_DIR:
 			dst_empty_dirs.add(dst_entry.normpath)
 
 	logger.debug(f"{len(src_relpaths)=}")
@@ -833,15 +946,11 @@ def _operations(
 	dst_only_relpaths = sorted(dst_relpaths.difference(src_relpaths))
 	both_relpaths     = sorted(src_relpaths.intersection(dst_relpaths))
 
-#	print(f"{src_only_relpaths=}")
-#	print(f"{dst_only_relpaths=}")
-#	print(f"{both_relpaths=}")
-
 	# Ignore remote files with invalid characters when copying to Windows
 	if os.sep == "\\" and isinstance(src_root, RemotePath):
 		for path in src_only_relpaths.copy():
 			if os.path.isreserved(path) or "\\" in path:
-				logger.warning(f"Warning: Ignoring remote file with invalid character in name: {path}")
+				logger.warning(f"Ignoring incompatible remote file: {path}")
 				src_only_relpaths.remove(path)
 
 	logger.debug(f"{len(src_only_relpaths)=}")
@@ -858,7 +967,13 @@ def _operations(
 		dst_relpath_real = dst_real_names[relpath]
 		src = dst_root / dst_relpath_real
 		assert not any(src.iterdir())
-		yield ("D-", src, None, 0, f"- {dst_relpath_real}{display_sep}")
+		yield _Operation(
+			category = _Operation.Category.DELETE_DIR,
+			src = src,
+			dst = None,
+			byte_diff = 0,
+			summary = f"- {dst_relpath_real}{display_sep}"
+		)
 
 	# Rename files
 	if rename_threshold is not None:
@@ -896,7 +1011,13 @@ def _operations(
 				src = dst_root / rename_from
 				dst = dst_root / rename_to
 
-				yield ("R", src, dst, 0, f"R {rename_from} -> {rename_to}")
+				yield _Operation(
+					category = _Operation.Category.RENAME_FILE,
+					src = src,
+					dst = dst,
+					byte_diff = 0,
+					summary = f"R {rename_from} -> {rename_to}"
+				)
 
 			except KeyError:
 				# dst file not a result of a rename
@@ -908,7 +1029,13 @@ def _operations(
 			dst_relpath_real = dst_real_names[dst_relpath]
 			src = dst_root / dst_relpath_real
 			byte_diff = -dst_meta[dst_relpath].size
-			yield ("-", src, None, byte_diff, f"- {dst_relpath_real}")
+			yield _Operation(
+				category = _Operation.Category.DELETE_FILE,
+				src = src,
+				dst = None,
+				byte_diff = byte_diff,
+				summary = f"- {dst_relpath_real}"
+			)
 
 	# Send files to trash
 	elif trash_root is not None:
@@ -918,7 +1045,13 @@ def _operations(
 			dst = trash_root     / dst_relpath_real
 			#byte_diff = -dst_meta[dst_relpath].size
 			byte_diff = 0
-			yield ("~", src, dst, byte_diff, f"~ {dst_relpath_real}")
+			yield _Operation(
+				category = _Operation.Category.TRASH_FILE,
+				src = src,
+				dst = dst,
+				byte_diff = byte_diff,
+				summary = f"~ {dst_relpath_real}"
+			)
 
 	# Create files
 	for src_relpath in src_only_relpaths:
@@ -926,7 +1059,13 @@ def _operations(
 		src = src_root / src_relpath_real
 		dst = dst_root / src_relpath_real
 		byte_diff = src_meta[src_relpath].size
-		yield ("+", src, dst, byte_diff, f"+ {src_relpath_real}")
+		yield _Operation(
+			category = _Operation.Category.CREATE_FILE,
+			src = src,
+			dst = dst,
+			byte_diff = byte_diff,
+			summary = f"+ {src_relpath_real}"
+		)
 
 	# Update files that have newer mtimes
 	for relpath in both_relpaths:
@@ -938,19 +1077,37 @@ def _operations(
 		src_time = src_meta[relpath].mtime
 		dst_time = dst_meta[relpath].mtime
 		if src_time > dst_time:
-			yield ("U", src, dst, byte_diff, f"U {dst_relpath_real}")
+			yield _Operation(
+				category = _Operation.Category.UPDATE_FILE,
+				src = src,
+				dst = dst,
+				byte_diff = byte_diff,
+				summary = f"U {dst_relpath_real}"
+			)
 		elif src_time < dst_time:
 			if force_update:
-				yield ("U", src, dst, byte_diff, f"U {dst_relpath_real}")
+				yield _Operation(
+					category = _Operation.Category.UPDATE_FILE,
+					src = src,
+					dst = dst,
+					byte_diff = byte_diff,
+					summary = f"U {dst_relpath_real}"
+				)
 			else:
-				logger.warning(f"Working copy is older than backed-up copy, skipping update: {relpath}")
+				logger.warning(f"'src' file is older than 'dst' file, skipping update: {relpath}")
 
 	# Create empty directories
 	src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
 	for relpath in src_only_empty_dirs:
 		src_relpath_real = src_real_names[relpath]
 		dst = dst_root / src_relpath_real
-		yield ("D+", None, dst, 0, f"+ {src_relpath_real}{display_sep}")
+		yield _Operation(
+			category = _Operation.Category.CREATE_DIR,
+			src = None,
+			dst = dst,
+			byte_diff = 0,
+			summary = f"+ {src_relpath_real}{display_sep}"
+		)
 
 def _reverse_dict(old_dict:dict[Any, Any]) -> dict[Any, Any]:
 	'''
@@ -979,22 +1136,19 @@ def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, fol
 		elif not dst.is_file():
 			raise FileExistsError(f"Cannot copy, dst is not a file: {src} -> {dst}")
 
-	delete_tmp = False
 	dst_tmp = dst.with_name(dst.name + ".tempcopy")
 	try:
 		# Copy into a temp file, with metadata
 		dir = dst.parent
 		dir.mkdir(parents=True, exist_ok=True)
-		if not isinstance(src, RemotePath) and not isinstance(dst_tmp, RemotePath):
+		if isinstance(src, Path) and isinstance(dst_tmp, Path):
 			shutil.copy2(src, dst_tmp, follow_symlinks=follow_symlinks)
 		else:
 			RemotePath.copy_file(src, dst_tmp, follow_symlinks=follow_symlinks)
 
-		delete_tmp = True
 		try:
-			# Rename the temp file into the dest file
+			# Replace the dst file with the tmp file
 			dst_tmp.replace(dst)
-			delete_tmp = False
 		except PermissionError as e:
 			# Remove read-only flag and try again
 			make_readonly = False
@@ -1005,14 +1159,11 @@ def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, fol
 				dst.chmod(stat.S_IWRITE)
 				make_readonly = True
 				dst_tmp.replace(dst)
-				delete_tmp = False
 			finally:
 				if make_readonly:
 					dst.chmod(stat.S_IREAD)
 	finally:
-		# Remove the temp copy if there are any errors
-		if delete_tmp:
-			dst_tmp.unlink()
+		dst_tmp.unlink(missing_ok=True)
 
 def _move(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = False) -> None:
 	'''
@@ -1030,9 +1181,9 @@ def _move(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = False) ->
 	if isinstance(src, Path) and isinstance(dst, Path):
 		pass
 	elif isinstance(src, Path):
-		raise ValueError("Cannot move src given by a Path to location given by RemotePath")
+		raise ValueError("Cannot move 'src' given by a Path to location given by RemotePath.")
 	elif isinstance(dst, Path):
-		raise ValueError("Cannot move src given by a RemotePath to location given by Path")
+		raise ValueError("Cannot move 'src' given by a RemotePath to location given by Path.")
 	else:
 		pass
 
@@ -1046,8 +1197,14 @@ def _delete_empty_dirs(dir:Path|RemotePath, dir_stop:Path|RemotePath) -> None:
 
 	if not dir.is_dir():
 		raise ValueError(f"Expected a dir: {dir}")
-	if not dir.is_relative_to(dir_stop):
-		raise ValueError(f"Chosen root ({dir_stop}) is not an ancestor of dir ({dir})")
+	if isinstance(dir, Path) and isinstance(dir_stop, Path):
+		if not dir.is_relative_to(dir_stop):
+			raise ValueError(f"Chosen root ({dir_stop}) is not an ancestor of dir ({dir})")
+	elif isinstance(dir, RemotePath) and isinstance(dir_stop, RemotePath):
+		if not dir.is_relative_to(dir_stop):
+			raise ValueError(f"Chosen root ({dir_stop}) is not an ancestor of dir ({dir})")
+	else:
+		raise ValueError(f"'dir' and 'dir_stop' must be the same type.")
 	#if any(dir.iterdir()):
 	#	raise ValueError(f"Dir is not empty: {dir}")
 	try:

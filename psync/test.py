@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Joe Walter
+# GNU General Public License v3.0
+
 import io
 import os
 import time
@@ -9,7 +12,8 @@ import unittest
 import doctest
 from pathlib import Path
 
-import psync
+from . import core, sftp
+from . import __main__ as main
 
 def hash_directory(root:Path, *, follow_links:bool=False, ignore_empty_dirs:bool=False, verbose:bool=False):
 	if verbose:
@@ -86,7 +90,8 @@ def create_file_structure(root_dir:Path, structure:dict, *, _symlinks:dict|None 
 		time.sleep(_delay)
 
 def load_tests(loader, tests, ignore):
-	tests.addTests(doctest.DocTestSuite(psync))
+	tests.addTests(doctest.DocTestSuite(core))
+	tests.addTests(doctest.DocTestSuite(sftp))
 	return tests
 
 class TestBackup(unittest.TestCase):
@@ -94,13 +99,13 @@ class TestBackup(unittest.TestCase):
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_argparse(self):
-		parsed = psync._ArgParser.parse(["src", "dst", "-f", "+ \"a b.txt\""])
+		parsed = main._ArgParser.parse(["src", "dst", "-f", "+ \"a b.txt\""])
 		self.assertTrue(parsed.filter[0] == "+ \"a b.txt\"")
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_filter(self):
-		f = psync._Filter(r"+ **")
+		f = core._Filter(r"+ **")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -111,7 +116,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = psync._Filter(r"+ **/*")
+		f = core._Filter(r"+ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -122,7 +127,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = psync._Filter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
+		f = core._Filter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -133,7 +138,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("a/__pycache__/"))
 		self.assertFalse(f.filter("a/b/__pycache__/"))
 
-		f = psync._Filter(r"+ audio/music/**/*.flac - **/*/ **/*")
+		f = core._Filter(r"+ audio/music/**/*.flac - **/*/ **/*")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -143,7 +148,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("audio/audiobooks/"))
 		self.assertFalse(f.filter("audio/music/OST/Star Wars/cover.jpg"))
 
-		f = psync._Filter(r"- audio/music/**/*.wav + audio/music/**")
+		f = core._Filter(r"- audio/music/**/*.wav + audio/music/**")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -153,7 +158,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("video/"))
 		self.assertFalse(f.filter("audio/audiobooks/"))
 
-		f = psync._Filter(r"places.sqlite key4.db logins.json cookies.sqlite prefs.js")
+		f = core._Filter(r"places.sqlite key4.db logins.json cookies.sqlite prefs.js")
 		self.assertTrue(f.filter("places.sqlite"))
 		self.assertTrue(f.filter("key4.db"))
 		self.assertTrue(f.filter("logins.json"))
@@ -162,7 +167,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("storage.sqlite"))
 		self.assertFalse(f.filter("storage/"))
 
-		f = psync._Filter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
+		f = core._Filter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
 		self.assertTrue(f.filter("**/a b"))
 		self.assertFalse(f.filter("a b"))
 		self.assertFalse(f.filter("1/2/a b"))
@@ -173,13 +178,13 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("Joe's File"))
 		self.assertFalse(f.filter("a"))
 
-		f = psync._Filter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
+		f = core._Filter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
 		self.assertTrue(f.filter("'a'"))
 		self.assertTrue(f.filter("\"b\""))
 		self.assertTrue(f.filter("x 1y ?"))
 		self.assertFalse(f.filter("x 1y 2"))
 
-		f = psync._Filter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
+		f = core._Filter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("b/a"))
 		self.assertTrue(f.filter("b/a/a"))
@@ -191,7 +196,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("b/b/y"))
 		self.assertFalse(f.filter("aa/y"))
 
-		f = psync._Filter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
+		f = core._Filter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("A"))
 		self.assertTrue(f.filter("b"))
@@ -203,12 +208,12 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("d/.a"))
 		self.assertFalse(f.filter("d/.A"))
 
-		f = psync._Filter(r"./a/ ./a/b")
+		f = core._Filter(r"./a/ ./a/b")
 		self.assertTrue(f.filter("a/"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertFalse(f.filter("c"))
 
-		f = psync._Filter(r"a/ a/b")
+		f = core._Filter(r"a/ a/b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter("a/"))
 			self.assertTrue(f.filter("a\\"))
@@ -222,7 +227,7 @@ class TestBackup(unittest.TestCase):
 			self.assertFalse(f.filter("a\\b"))
 			self.assertFalse(f.filter("c"))
 
-		f = psync._Filter(r"a\\ a\b")
+		f = core._Filter(r"a\\ a\b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter("a/"))
 			self.assertTrue(f.filter("a\\"))
@@ -236,7 +241,7 @@ class TestBackup(unittest.TestCase):
 			self.assertTrue(f.filter("a\\b"))
 			self.assertFalse(f.filter("c"))
 
-		f = psync._Filter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
+		f = core._Filter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
 		self.assertTrue(f.filter("- a"))
 		self.assertTrue(f.filter("-a"))
 		self.assertTrue(f.filter("--"))
@@ -247,21 +252,21 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a'b"))
 		self.assertFalse(f.filter("b"))
 
-		f = psync._Filter(r"'-'")
+		f = core._Filter(r"'-'")
 		self.assertTrue(f.filter("-"))
 		self.assertFalse(f.filter("a"))
 
-		f = psync._Filter("\"-\"")
+		f = core._Filter("\"-\"")
 		self.assertTrue(f.filter("-"))
 		self.assertFalse(f.filter("a"))
 
-		f = psync._Filter(r"\-")
+		f = core._Filter(r"\-")
 		self.assertFalse(f.filter("-"))
 		self.assertTrue(f.filter("\\-"))
 		self.assertFalse(f.filter("a"))
 
-		self.assertRaises(psync._InputError, psync._Filter, r"+ 'a")
-		self.assertRaises(psync._InputError, psync._Filter,  "+ a\\")
+		self.assertRaises(core._InputError, core._Filter, r"+ 'a")
+		self.assertRaises(core._InputError, core._Filter,  "+ a\\")
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -331,7 +336,7 @@ class TestBackup(unittest.TestCase):
 			}
 			create_file_structure(root, file_structure)
 
-			files = psync._scandir(
+			files = core._scandir(
 				root = root,
 				filter = "- b/ c/ + **/*/ **/1.???"
 			)
@@ -350,7 +355,7 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = psync._scandir(
+			files = core._scandir(
 				root = root,
 				filter = "+ a/a?/a?b/*",
 			)
@@ -386,7 +391,7 @@ class TestBackup(unittest.TestCase):
 			}
 			create_file_structure(root, file_structure)
 
-			files = psync._scandir(
+			files = core._scandir(
 				root = root / "d",
 				filter = "+ **/*/ **/*",
 				ignore_symlinks = False,
@@ -406,7 +411,7 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = psync._scandir(
+			files = core._scandir(
 				root = root / "d",
 				filter = "+ **/*/ **/*",
 				follow_symlinks = True,
@@ -427,7 +432,7 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = psync._scandir(
+			files = core._scandir(
 				root = root / "g",
 				filter = "+ **/*/ **/*",
 				follow_symlinks = True,
@@ -442,7 +447,7 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = psync._scandir(
+			files = core._scandir(
 				root = root / "d",
 				filter = "+ **/*/ **/*",
 				ignore_symlinks = True,
@@ -485,14 +490,14 @@ class TestBackup(unittest.TestCase):
 
 			a_root = root / "a"
 			b_root = root / "b"
-			a_files = psync._scandir(
+			a_files = core._scandir(
 				root = a_root
 			)
-			b_files = psync._scandir(
+			b_files = core._scandir(
 				root = b_root
 			)
 
-			actual = list(op.summary for op in psync._operations(
+			actual = list(op.summary for op in core._operations(
 				src_root         = a_root,
 				dst_root         = b_root,
 				src_files        = a_files,
@@ -520,13 +525,13 @@ class TestBackup(unittest.TestCase):
 
 			a_root = root / "a"
 			c_root = root / "c"
-			a_files = psync._scandir(
+			a_files = core._scandir(
 				root = a_root
 			)
-			c_files = psync._scandir(
+			c_files = core._scandir(
 				root = c_root
 			)
-			actual = list(op.summary for op in psync._operations(
+			actual = list(op.summary for op in core._operations(
 				src_root         = a_root,
 				dst_root         = c_root,
 				src_files        = a_files,
@@ -559,7 +564,7 @@ class TestBackup(unittest.TestCase):
 
 			src = root / "a" / "a" / "1.txt"
 			dst = root / "b" / "b" / "2.txt"
-			psync._move(src, dst)
+			core._move(src, dst)
 			self.assertEqual(os.listdir(root / "a" / "a"), [])
 			self.assertEqual(os.listdir(root / "b" / "b"), ["2.txt"])
 
@@ -623,7 +628,7 @@ class TestBackup(unittest.TestCase):
 
 			# test dry_run
 			self.assertFalse(hash_src_old == hash_dst_old)
-			results = psync.sync(
+			results = core.sync(
 				src,
 				dst,
 				trash = "auto",
@@ -635,13 +640,13 @@ class TestBackup(unittest.TestCase):
 			################################################################################
 
 			# test basic backup
-			results = psync.sync(
+			results = core.sync(
 				src,
 				dst,
 				trash = "auto",
 				quiet = True
 			)
-			self.assertTrue(results.status == psync.Results.Status.COMPLETED)
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertFalse(hash_directory(dst) == hash_dst_old)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			if "nt" in os.name:
@@ -660,7 +665,7 @@ class TestBackup(unittest.TestCase):
 			src2 = root / "src2"
 			dst2 = root / "dst2"
 			hash_dst2_old = hash_directory(dst2)
-			results = psync.sync(
+			results = core.sync(
 				src2,
 				dst2,
 				quiet = True,
@@ -718,7 +723,7 @@ class TestBackup(unittest.TestCase):
 			create_file_structure(root, file_structure)
 			src = root / "src"
 			dst = root / "dst"
-			results = psync.sync(
+			results = core.sync(
 				src,
 				dst,
 				trash = "auto",

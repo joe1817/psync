@@ -20,23 +20,23 @@ psync is a simple utility to copy files from one folder to another.
 
 ## Examples
 
-`python psync.py src dst`
+`python -m psync src dst`
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/`, replacing files whose modtimes are newer in `src/`.
 
-`python psync.py src dst -x`
+`python -m psync src dst -x`
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/` and deletes extra files (i.e., files that exist in `dst/` but not `src/`).
 
-`python psync.py src dst -t trash`
+`python -m psync src dst -t trash`
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/` and moves extra files into `trash/`.
 
-`python psync.py src user@192.168.1.100/dst`
+`python -m psync src user@192.168.1.100/dst`
 
 &emsp; ↳ Sync using SFTP the local `src/` directory to the remote `dst/` directory.
 
-`python psync.py src dst !args.txt`
+`python -m psync src dst !args.txt`
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/`, using arguments from the file, `args.txt`.
 
@@ -50,22 +50,22 @@ The indicator preceding the first matching pattern determines whether to include
 
 When a nested file is included, e.g., `+ foo/**/bar.txt`, then parent folders are also automatically included. This example is equiavlent to `+ foo/ foo/**/ foo/**/bar.txt`.
 
-`python psync.py src dst -f foo.txt`
+`python -m psync src dst -f foo.txt`
 
 &emsp; ↳ Copies the `foo.txt` file inside `src/` to `dst/`. Skips all other files and does not recurse into subfolders.
 
-`python psync.py src dst -f + **/*.txt`
+`python -m psync src dst -f + **/*.txt`
 
 &emsp; ↳ Copies all .txt files inside `src/` to `dst/`.
 
-`python psync.py src dst -f - "skip these/" + **/*.txt`
+`python -m psync src dst -f - "skip these/" + **/*.txt`
 
 &emsp; ↳ Copies all .txt files inside `src/` to `dst/`, except those in the `src/skip these/` folder.
 
-`python psync.py src dst -f - **/__pycache__/ + **`
+`python -m psync src dst -f - **/__pycache__/ + **`
 
 &emsp; ↳ Copies all files inside `src/` to `dst/`, except for those inside folders named `__pycache__`.
 
-`python psync.py src dst -f ./-`
+`python -m psync src dst -f ./-`
 
 &emsp; ↳ Copies all the `-` file inside `src/` to `dst/`.

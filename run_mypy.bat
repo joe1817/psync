@@ -1,3 +1,3 @@
 @echo off
-mypy .
+mypy psync
 pause

@@ -449,17 +449,12 @@ class RemotePath:
 			return False
 		return PurePosixPath(self).is_relative_to(target)
 
-class RemotePathScanner:
+class _RemotePathScanner:
 	def __init__(self, path:RemotePath):
-		connection = RemotePath.sftp_connections[path.conn_details]
-		# always follow symlinks, just like os.scandir()
-		self.entries = (path / d for d in connection.listdir(str(path)))
+		self.entries = path.iterdir()
 
 	def __iter__(self):
-		return self
-
-	def __next__(self):
-		return self.entries.__next__()
+		return self.entries
 
 	def __enter__(self):
 		return self

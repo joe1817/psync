@@ -19,11 +19,9 @@ if sys.version_info >= (3, 13):
 else:
 	import glob2 as glob
 
-from .sftp import RemotePath, RemotePathScanner
-
+from .sftp import RemotePath, _RemotePathScanner
 
 logger = logging.getLogger("psync")
-
 
 class _DebugInfoFilter(logging.Filter):
 	'''Logging filter that only allows DEBUG and INFO records to pass.'''
@@ -884,7 +882,7 @@ def _walk(top:Path|RemotePath, *,  ignore_symlinks:bool = False, follow_symlinks
 		nondirs = []
 
 		try:
-			scanner = RemotePathScanner(top) if isinstance(top, RemotePath) else os.scandir(top)
+			scanner = _RemotePathScanner(top) if isinstance(top, RemotePath) else os.scandir(top)
 			with scanner as entries:
 				for entry in entries:
 					try:
@@ -1132,24 +1130,6 @@ def _operations(
 			summary = f"+ {src_relpath_real}{display_sep}"
 		)
 
-def _reverse_dict(old_dict:dict[Any, Any]) -> dict[Any, Any]:
-	'''
-	Reverses a `dict` by swapping keys and values. If a value in `old_dict` appears more than once, then the corresponding key in the reversed `dict` will point to a `None`.
-
-	>>> _reverse_dict({"a":1, "b":2, "c":2})[1]
-	'a'
-	>>> _reverse_dict({"a":1, "b":2, "c":2})[2] is None
-	True
-	'''
-
-	reversed:dict[Any, Any] = {}
-	for key, val in old_dict.items():
-		if val in reversed:
-			reversed[val] = None
-		else:
-			reversed[val] = key
-	return reversed
-
 def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
 	'''Copy file from `src` to `dst`, keeping timestamp metadata. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
@@ -1246,6 +1226,24 @@ def _last_bytes(file_path:Path, n:int = 1024) -> bytes:
 	with file_path.open("rb") as f:
 		f.seek(-bytes_to_read, os.SEEK_END)
 		return f.read()
+
+def _reverse_dict(old_dict:dict[Any, Any]) -> dict[Any, Any]:
+	'''
+	Reverses a `dict` by swapping keys and values. If a value in `old_dict` appears more than once, then the corresponding key in the reversed `dict` will point to a `None`.
+
+	>>> _reverse_dict({"a":1, "b":2, "c":2})[1]
+	'a'
+	>>> _reverse_dict({"a":1, "b":2, "c":2})[2] is None
+	True
+	'''
+
+	reversed:dict[Any, Any] = {}
+	for key, val in old_dict.items():
+		if val in reversed:
+			reversed[val] = None
+		else:
+			reversed[val] = key
+	return reversed
 
 def _human_readable_size(n:int) -> str:
 	'''

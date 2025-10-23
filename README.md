@@ -1,13 +1,22 @@
 # psync.py
 
+psync is a simple utility to copy files from one folder to another.
+
 ## Features
 
 - Can be used on the command line or as an imported module.
-- Files that were renamed in the src folder will be renamed in the dst folder, without unnecessarily copying files.
-- Won't delete files (by default) but will "recycle" files instead by moving them to a different folder of your choosing.
+- Files that were renamed in the src folder can be renamed in the dst folder, without unnecessarily copying files.
+- Can "recycle" extra files in the dst folder by moving them to a different folder of your choosing.
 - Include/exclude files based on recursive glob patterns.
+- Can copy to a remote server using SFTP.
 - Log the results to a log file.
 - `--dry-run` option to print would-be results without actually making changes to the file system.
+
+## Requirements
+- python 3.13+ (earlier versions can be used if you install the glob2 package)
+
+## Dependencies
+- paramiko (only if you intend to use SFTP)
 
 ## Examples
 
@@ -57,6 +66,6 @@ When a nested file is included, e.g., `+ foo/**/bar.txt`, then parent folders ar
 
 &emsp; ↳ Copies all files inside `src/` to `dst/`, except for those inside folders named `__pycache__`.
 
-`python psync.py src dst -f "-" "--log"`
+`python psync.py src dst -f ./-`
 
-&emsp; ↳ Copies all the `-` and `--log` files inside `src/` to `dst/`.
+&emsp; ↳ Copies all the `-` file inside `src/` to `dst/`.

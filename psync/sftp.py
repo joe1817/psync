@@ -26,13 +26,15 @@ logger = logging.getLogger("psync")
 
 # TODO use/extend PurePosixPath
 class RemotePath:
-	'''A class that operates on a remote SFTP server using a paramiko SFTPClient object.'''
+	'''A class that mimics a Path object while operating on a remote SFTP server using a paramiko SFTPClient object.'''
 
 	ssh_connections :dict[str, paramiko.client.SSHClient] = {}
 	sftp_connections:dict[str, paramiko.sftp_client.SFTPClient] = {}
 
 	@classmethod
 	def create(cls, s:str, timeout=10) -> "RemotePath":
+		'''Factory method for creating new `RemotePath` objects. This is the way to create new RemotePath objects outside this module.'''
+
 		if "paramiko" not in globals():
 			raise ImportError("Paramiko package is needed for SFTP connections. Install it with: pip install paramiko")
 
@@ -97,6 +99,8 @@ class RemotePath:
 
 	@classmethod
 	def close_connections(cls):
+		'''Close all SSH and SFTP connections.'''
+
 		for ftp in cls.sftp_connections:
 			try:
 				ftp.close()
@@ -112,6 +116,8 @@ class RemotePath:
 
 	@classmethod
 	def copy_file(cls, src, dst, *, follow_symlinks:bool = False):
+		'''Copy a file where at least one of `src` and `dst` is a `RemotePath` object.'''
+
 		if isinstance(src, RemotePath) and isinstance(dst, RemotePath):
 			try:
 				temp_file_path = None
@@ -131,6 +137,8 @@ class RemotePath:
 
 	@classmethod
 	def _get_file(cls, src:"RemotePath", dst:Path, *, follow_symlinks:bool = False):
+		'''Download `src` file to `src`.'''
+
 		connection = RemotePath.sftp_connections[src.conn_details]
 		st = src.stat(follow_symlinks=follow_symlinks)
 		if follow_symlinks or not src.is_symlink():
@@ -160,6 +168,8 @@ class RemotePath:
 
 	@classmethod
 	def _put_file(cls, src:Path, dst:"RemotePath", *, follow_symlinks:bool = False):
+		'''Upload `src` file to `dst`.'''
+
 		connection = RemotePath.sftp_connections[dst.conn_details]
 		st = src.stat(follow_symlinks=follow_symlinks)
 		if follow_symlinks or not src.is_symlink():
@@ -192,6 +202,8 @@ class RemotePath:
 
 	@property
 	def parent(self) -> "RemotePath":
+		'''Returns a `RemotePath` object of the parent directory.'''
+
 		new_path_obj = posixpath.dirname(self.path) # this is why self.path cannot end with trailing slash
 		return type(self)(new_path_obj, self.conn_details)
 
@@ -213,17 +225,20 @@ class RemotePath:
 		return self.path
 
 	def joinpath(self, *other:str|os.PathLike[str]) -> "RemotePath":
-		"""
-		Overrides the joinpath method to return a new "RemotePath" object.
-		"""
+		'''Append path elements to create a new `RemotePath`.'''
+
 		#new_path_obj = self.path + "/" + "/".join(str(s) for s in other)
 		new_path_obj = posixpath.join(self.path, *other)
 		return type(self)(new_path_obj, self.conn_details)
 
 	def with_name(self, new_name:str|os.PathLike[str]) -> "RemotePath":
+		'''Returns a new `RemotePath` with the `name` changed.'''
+
 		return self.parent / new_name
 
 	def stat(self, *, follow_symlinks:bool = True) -> paramiko.sftp_attr.SFTPAttributes:
+		'''Returns a `paramiko.sftp_attr.SFTPAttributes` object for the remote file/directory.'''
+
 		if follow_symlinks:
 			if not self._stat:
 				self._stat = RemotePath.sftp_connections[self.conn_details].stat(str(self))
@@ -240,6 +255,8 @@ class RemotePath:
 			return self._lstat
 
 	def exists(self, *, follow_symlinks:bool = True) -> bool:
+		'''Returns `True` if the remote file/directory exists.'''
+
 		try:
 			st = self.stat(follow_symlinks=follow_symlinks)
 			return True
@@ -247,6 +264,8 @@ class RemotePath:
 			return False
 
 	def is_symlink(self) -> bool:
+		'''Returns `True` if the remote file/directory is a symlink.'''
+
 		st = self.stat(follow_symlinks=False)
 		assert st.st_mode is not None
 		return stat.S_ISLNK(st.st_mode)
@@ -256,16 +275,22 @@ class RemotePath:
 		return False # TODO
 
 	def is_dir(self, *, follow_symlinks:bool = True) -> bool:
+		'''Returns `True` if the remote file/directory is a directory.'''
+
 		st = self.stat(follow_symlinks=follow_symlinks)
 		assert st.st_mode is not None
 		return stat.S_ISDIR(st.st_mode)
 
 	def is_file(self, *, follow_symlinks:bool=True) -> bool:
+		'''Returns `True` if the remote file/directory is a regular file.'''
+
 		st = self.stat(follow_symlinks=follow_symlinks)
 		assert st.st_mode is not None
 		return stat.S_ISREG(st.st_mode)
 
 	def resolve(self, strict:bool = False) -> "RemotePath":
+		'''Returns a `RemotePath` with an absolute, normalized path string.'''
+
 		rp = type(self)(RemotePath.sftp_connections[self.conn_details].normalize(str(self)), self.conn_details)
 		if rp._stat is None:
 			rp._stat = self._lstat
@@ -280,13 +305,12 @@ class RemotePath:
 			yield entry
 
 	def chmod(self, mode, *, follow_symlinks:bool = True) -> None:
+		'''chmod of the remote file/directory.'''
+
 		RemotePath.sftp_connections[self.conn_details].chmod(str(self), mode)
 
 	def read_text(self, encoding:str|None = "utf-8", errors:str|None = "strict", newline:str|None = os.linesep) -> str:
-		"""
-		Reads the content of a file on the remote server and returns it as a string.
-		Uses a temporary local file for the transfer.
-		"""
+		'''Reads and returns the content of the remote file as text.'''
 
 		if not self.is_file():
 			raise FileNotFoundError(f"No such file on remote:'{self}'")
@@ -303,16 +327,11 @@ class RemotePath:
 			os.remove(tmp_path) # Clean up the temporary file
 
 	def write_text(self, data:str, encoding:str|None = "utf-8", errors:str|None = "strict", newline:str|None = os.linesep) -> int:
-		"""
-		Writes a string to a file on the remote server.
-		Uses a temporary local file for the transfer.
-		"""
+		'''Writes text content to the remote file.'''
 
-		# Create a temporary file to write the content to locally first
 		with tempfile.NamedTemporaryFile(mode="w", delete=False, encoding=encoding, errors=errors) as tmp_file:
 			tmp_file.write(data)
 			tmp_path = tmp_file.name
-
 		try:
 			RemotePath.sftp_connections[self.conn_details].put(tmp_path, str(self))
 		finally:
@@ -320,17 +339,12 @@ class RemotePath:
 		return 0
 
 	def read_bytes(self) -> bytes:
-		"""
-		Reads the content of a file on the remote server and returns it as bytes.
-		Uses a temporary local file for the transfer.
-		"""
+		'''Reads and returns the content of the remote file as bytes.'''
 
 		if not self.is_file():
 			raise FileNotFoundError(f"No such file on remote:'{self}'")
-
 		with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
 			tmp_path = tmp_file.name
-
 		try:
 			RemotePath.sftp_connections[self.conn_details].get(str(self), tmp_path)
 			with open(tmp_path, "rb") as f:
@@ -339,15 +353,11 @@ class RemotePath:
 			os.remove(tmp_path)
 
 	def write_bytes(self, data:Buffer) -> int:
-		"""
-		Writes bytes to a file on the remote server.
-		Uses a temporary local file for the transfer.
-		"""
+		'''Writes byte content to the remote file.'''
 
 		with tempfile.NamedTemporaryFile(mode="wb", delete=False) as tmp_file:
 			tmp_file.write(data)
 			tmp_path = tmp_file.name
-
 		try:
 			RemotePath.sftp_connections[self.conn_details].put(tmp_path, str(self))
 		finally:
@@ -355,6 +365,8 @@ class RemotePath:
 		return 0
 
 	def mkdir(self, mode:int = 0o777, parents:bool = False, exist_ok:bool = False) -> None:
+		'''Create the remote directory.'''
+
 		try:
 			parent = self.parent
 			if parents and self != parent and not parent.exists():
@@ -365,15 +377,23 @@ class RemotePath:
 				pass
 
 	def rmdir(self) -> None:
+		'''Delete the remote directory.'''
+
 		RemotePath.sftp_connections[self.conn_details].rmdir(str(self))
 
 	def unlink(self, missing_ok:bool = True) -> None:
+		'''Delete the remote file.'''
+
 		RemotePath.sftp_connections[self.conn_details].remove(str(self))
 
 	def open(self, mode = "r", buffering = -1, encoding = None, errors = None, newline = None):
+		'''Open the remote file.'''
+
 		return RemotePath.sftp_connections[self.conn_details].open(str(self), mode="r")
 
 	def rename(self, target:"RemotePath") -> "RemotePath":
+		'''Renames this file/directory to the given `target`, and return a new `Path` instance pointing to `target`.'''
+
 		if not isinstance(target, RemotePath):
 			#target = type(self)(str(target), self.conn_details)
 			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
@@ -383,6 +403,8 @@ class RemotePath:
 		return target
 
 	def replace(self, target:"RemotePath") -> "RemotePath":
+		'''Replaces this file/directory over the given `target`, and return a new `Path` instance pointing to `target`. This is NOT an atomic operation.'''
+
 		if not isinstance(target, RemotePath):
 			#target = type(self)(str(target), self.conn_details)
 			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
@@ -395,6 +417,8 @@ class RemotePath:
 		return self.rename(target)
 
 	def samefile(self, target:"RemotePath") -> bool:
+		'''Returns `True` if the remote file/directory and `target` are the same file.'''
+
 		if not isinstance(target, RemotePath):
 			#target = type(self)(str(target), self.conn_details)
 			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
@@ -404,6 +428,8 @@ class RemotePath:
 		return self.resolve() == target.resolve()
 
 	def relative_to(self, target:"RemotePath") -> "RemotePath":
+		'''Returns a `RemotePath` with path string relative to `target`.'''
+
 		if not isinstance(target, RemotePath):
 			#target = type(self)(str(target), self.conn_details)
 			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
@@ -414,6 +440,8 @@ class RemotePath:
 		return type(self)(new_path, self.conn_details)
 
 	def is_relative_to(self, target:"RemotePath") -> bool:
+		'''Returns `True` if the remote file/directory is relative to `target`.'''
+
 		if not isinstance(target, RemotePath):
 			#target = type(self)(str(target), self.conn_details)
 			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")

@@ -8,12 +8,25 @@ import contextlib
 import hashlib
 import tempfile
 import traceback
+import logging
 import unittest
 import doctest
 from pathlib import Path
 
 from . import core, sftp
 from . import __main__ as main
+
+logger = logging.getLogger("psync")
+
+class TempLoggingLevel:
+	def __init__(self, logger, level):
+		self.logger = logger
+		self.level = level
+	def __enter__(self):
+		self.old_level = self.logger.level
+		self.logger.setLevel(self.level)
+	def __exit__(self, exc_type, exc_val, exc_tb):
+		self.logger.setLevel(self.old_level)
 
 def hash_directory(root:Path, *, follow_links:bool=False, ignore_empty_dirs:bool=False, verbose:bool=False):
 	if verbose:
@@ -440,10 +453,11 @@ class TestBackup(unittest.TestCase):
 			files_expected = [
 				"1.txt",
 			]
-			self.assertEqual(
-				sorted(f.normpath for f in files),
-				sorted(f.replace("/", os.sep) for f in files_expected)
-			)
+			with TempLoggingLevel(logger, logging.ERROR):
+				self.assertEqual(
+					sorted(f.normpath for f in files),
+					sorted(f.replace("/", os.sep) for f in files_expected)
+				)
 
 			################################################################################
 

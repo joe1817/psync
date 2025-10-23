@@ -2,15 +2,20 @@
 # GNU General Public License v3.0
 
 import os
+import sys
 import posixpath
 import stat
 import socket
 import tempfile
 import logging
-from pathlib import PurePath
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
-from collections.abc import Buffer
-from typing import Generator
+from typing import Iterator, Union
+
+if sys.version_info >= (3, 12):
+    from collections.abc import Buffer
+else:
+    Buffer = Union[bytes, bytearray, memoryview]
 
 try:
 	import paramiko
@@ -19,12 +24,9 @@ except ImportError:
 
 logger = logging.getLogger("psync")
 
-# TODO use/extend PurePath
+# TODO use/extend PurePosixPath
 class RemotePath:
-	"""
-	A Path subclass that operates on a remote SFTP server using an existing
-	paramiko SFTPClient object.
-	"""
+	'''A class that operates on a remote SFTP server using a paramiko SFTPClient object.'''
 
 	ssh_connections :dict[str, paramiko.client.SSHClient] = {}
 	sftp_connections:dict[str, paramiko.sftp_client.SFTPClient] = {}
@@ -41,7 +43,7 @@ class RemotePath:
 			raise ValueError("Malformed URI")
 
 		if parsed.netloc not in cls.ssh_connections:
-			password = input(f"Password for {parsed.netloc}: ")
+			password = parsed.password or input(f"Password for {parsed.netloc}: ")
 
 			ssh = paramiko.SSHClient()
 			ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -68,7 +70,30 @@ class RemotePath:
 			ftp = ssh.open_sftp()
 			cls.sftp_connections[parsed.netloc] = ftp
 
-		return RemotePath(parsed.path or "/", parsed.netloc)
+		path = parsed.path or "/"
+		if path.startswith("/~"):
+			# expand ~ to user's home directory
+			parts = path.split("/")
+			user  = parts[1][1:]
+			ssh   = cls.ssh_connections[parsed.netloc]
+			try:
+				if user == "":
+					stdin, stdout, stderr = ssh.exec_command("echo $HOME")
+				else:
+					stdin, stdout, stderr = ssh.exec_command(f"getent passwd {user} | cut -d: -f6")
+				remote_home_dir = stdout.read().decode().strip()
+			except paramiko.ssh_exception.SSHException:
+				raise ConnectionError(f"Unable to expand ~ to user's home directory.")
+			if not remote_home_dir:
+				raise ConnectionError(f"User not found.")
+			else:
+				path = posixpath.join(remote_home_dir, *parts[2:])
+		elif path.startswith("/\\~"):
+			# treat escaped ~ character as literal
+			path = "/" + path[2:]
+
+		path = cls.sftp_connections[parsed.netloc].normalize(path)
+		return RemotePath(path, parsed.netloc)
 
 	@classmethod
 	def close_connections(cls):
@@ -82,43 +107,80 @@ class RemotePath:
 				ssh.close()
 			except:
 				pass
+		cls.sftp_connections = []
+		cls.ssh_connections = []
 
 	@classmethod
 	def copy_file(cls, src, dst, *, follow_symlinks:bool = False):
 		if isinstance(src, RemotePath) and isinstance(dst, RemotePath):
-			with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as temp_file:
-				src_connection = RemotePath.sftp_connections[src.conn_details]
-				if follow_symlinks:
-					src = src.resolve()
-				stat = src.stat()
-				src_connection.get(str(src), temp_file)
-
-				dst_connection = RemotePath.sftp_connections[dst.conn_details]
-				dst_connection.put(temp_file, str(dst))
-				dst_connection.utime(str(dst), (stat.st_atime, stat.st_mtime))
+			try:
+				temp_file_path = None
+				with tempfile.NamedTemporaryFile(delete=False, mode='w+') as temp_file:
+					temp_file_path = Path(temp_file.name)
+				RemotePath._get_file(src, temp_file_path, follow_symlinks=follow_symlinks)
+				RemotePath._put_file(temp_file_path, dst, follow_symlinks=follow_symlinks)
+			finally:
+				if temp_file_path:
+					os.unlink(temp_file_path)
 		elif isinstance(src, RemotePath):
-			connection = RemotePath.sftp_connections[src.conn_details]
-			if follow_symlinks:
-				src = src.resolve()
-			stat = src.stat()
-			connection.get(str(src), dst)
-			os.utime(dst, (stat.st_atime, stat.st_mtime))
+			RemotePath._get_file(src, dst, follow_symlinks=follow_symlinks)
 		elif isinstance(dst, RemotePath):
-			connection = RemotePath.sftp_connections[dst.conn_details]
-			if follow_symlinks:
-				src = src.resolve()
-			stat = src.stat()
-			connection.put(src, str(dst))
-			connection.utime(str(dst), (stat.st_atime, stat.st_mtime))
+			RemotePath._put_file(src, dst, follow_symlinks=follow_symlinks)
 		else:
 			raise ValueError("At least one path must be a RemotePath")
+
+	@classmethod
+	def _get_file(cls, src:"RemotePath", dst:Path, *, follow_symlinks:bool = False):
+		connection = RemotePath.sftp_connections[src.conn_details]
+		st = src.stat(follow_symlinks=follow_symlinks)
+		if follow_symlinks or not src.is_symlink():
+			connection.get(str(src), str(dst))
+		else:
+			target = connection.readlink(str(src))
+			if target:
+				# TODO Absolute path symlinks can be updated if src_root and dst_root are known
+				#try:
+				#	if posixpath.commonpath([target, src_root]):
+				#		target = posixpath.join(dst_root, posixpath.relpath(target, src_root))
+				#except ValueError:
+				#	# target is a relative path or is on different drive from src_root
+				#	pass
+				if os.sep == "\\":
+					if os.path.isreserved(target) or "\\" in target:
+						raise OSError(f"Symlink has incompatible target: {src} -> {target}")
+					else:
+						target = target.replace("/", os.sep)
+				os.symlink(target, str(dst), target_is_directory=src.is_dir())
+			else:
+				raise OSError(f"Broken symlink: {src}")
+		if st.st_atime is not None and st.st_mtime is not None:
+			os.utime(dst, (st.st_atime, st.st_mtime))
+		else:
+			logger.warning(f"Could not update time metadata: {src}")
+
+	@classmethod
+	def _put_file(cls, src:Path, dst:"RemotePath", *, follow_symlinks:bool = False):
+		connection = RemotePath.sftp_connections[dst.conn_details]
+		st = src.stat(follow_symlinks=follow_symlinks)
+		if follow_symlinks or not src.is_symlink():
+			connection.put(str(src), str(dst))
+		else:
+			target = os.readlink(str(src)).replace(os.sep, "/")
+			if target:
+				connection.symlink(target, str(dst))
+			else:
+				raise OSError(f"Broken symlink: {src}")
+		if st.st_atime is not None and st.st_mtime is not None:
+			connection.utime(str(dst), (st.st_atime, st.st_mtime))
+		else:
+			logger.warning(f"Could not update time metadata: {src}")
 
 	connection:paramiko.sftp_client.SFTPClient
 
 	def __init__(self, path:str|os.PathLike[str], conn_details:str):
 		path = str(path)
-		if path != "/" and path.endswith("/"):
-			path = path[:-1]
+		if path != "/":
+			path = path.rstrip("/")
 		parts = posixpath.splitext(path)
 		self.path         : str = path
 		self.conn_details : str = conn_details
@@ -158,65 +220,69 @@ class RemotePath:
 		new_path_obj = posixpath.join(self.path, *other)
 		return type(self)(new_path_obj, self.conn_details)
 
-	def with_name(self, new_name) -> "RemotePath":
+	def with_name(self, new_name:str|os.PathLike[str]) -> "RemotePath":
 		return self.parent / new_name
 
-	def stat(self, *, follow_symlinks=True) -> paramiko.sftp_attr.SFTPAttributes:
+	def stat(self, *, follow_symlinks:bool = True) -> paramiko.sftp_attr.SFTPAttributes:
 		if follow_symlinks:
 			if not self._stat:
 				self._stat = RemotePath.sftp_connections[self.conn_details].stat(str(self))
-				if not stat.S_ISLNK(self._stat.st_mode):
+				if self._stat.st_mode is not None and not stat.S_ISLNK(self._stat.st_mode):
 					self._lstat = self._stat
 			assert self._stat is not None
 			return self._stat
 		else:
 			if not self._lstat:
 				self._lstat = RemotePath.sftp_connections[self.conn_details].lstat(str(self))
-				if not stat.S_ISLNK(self._lstat.st_mode):
+				if self._lstat.st_mode is not None and not stat.S_ISLNK(self._lstat.st_mode):
 					self._stat = self._lstat
 			assert self._lstat is not None
 			return self._lstat
 
-	def exists(self, *, follow_symlinks:bool=True) -> bool:
+	def exists(self, *, follow_symlinks:bool = True) -> bool:
 		try:
-			attrs = self.stat(follow_symlinks=follow_symlinks)
+			st = self.stat(follow_symlinks=follow_symlinks)
 			return True
 		except FileNotFoundError:
 			return False
 
 	def is_symlink(self) -> bool:
-		attrs = RemotePath.sftp_connections[self.conn_details].lstat(str(self))
-		assert attrs.st_mode is not None
-		return stat.S_ISLNK(attrs.st_mode)
+		st = self.stat(follow_symlinks=False)
+		assert st.st_mode is not None
+		return stat.S_ISLNK(st.st_mode)
 
 	# needed to mimic os.DirEntry
 	def is_junction(self) -> bool:
 		return False # TODO
 
-	def is_dir(self, *, follow_symlinks:bool=True) -> bool:
-		attrs = self.stat(follow_symlinks=follow_symlinks)
-		assert attrs.st_mode is not None
-		return stat.S_ISDIR(attrs.st_mode)
+	def is_dir(self, *, follow_symlinks:bool = True) -> bool:
+		st = self.stat(follow_symlinks=follow_symlinks)
+		assert st.st_mode is not None
+		return stat.S_ISDIR(st.st_mode)
 
 	def is_file(self, *, follow_symlinks:bool=True) -> bool:
-		attrs = self.stat(follow_symlinks=follow_symlinks)
-		assert attrs.st_mode is not None
-		return stat.S_ISREG(attrs.st_mode)
+		st = self.stat(follow_symlinks=follow_symlinks)
+		assert st.st_mode is not None
+		return stat.S_ISREG(st.st_mode)
 
-	def resolve(self, strict=False) -> "RemotePath":
+	def resolve(self, strict:bool = False) -> "RemotePath":
 		rp = type(self)(RemotePath.sftp_connections[self.conn_details].normalize(str(self)), self.conn_details)
 		if rp._stat is None:
 			rp._stat = self._lstat
 		return rp
 
-	def iterdir(self) -> Generator["RemotePath"]:
-		for item_name in RemotePath.sftp_connections[self.conn_details].listdir(str(self)):
-			yield type(self)(str(self / item_name), self.conn_details)
+	def iterdir(self) -> Iterator["RemotePath"]:
+		'''Returns an iterator of `RemotePath` objects pointing to the contents of the remote directory.'''
 
-	def chmod(self, mode, *, follow_symlinks=True) -> None:
+		for st in RemotePath.sftp_connections[self.conn_details].listdir_iter(str(self)):
+			entry = self / st.filename
+			entry._lstat = st
+			yield entry
+
+	def chmod(self, mode, *, follow_symlinks:bool = True) -> None:
 		RemotePath.sftp_connections[self.conn_details].chmod(str(self), mode)
 
-	def read_text(self, encoding:str|None="utf-8", errors:str|None="strict", newline:str|None=os.linesep) -> str:
+	def read_text(self, encoding:str|None = "utf-8", errors:str|None = "strict", newline:str|None = os.linesep) -> str:
 		"""
 		Reads the content of a file on the remote server and returns it as a string.
 		Uses a temporary local file for the transfer.
@@ -236,7 +302,7 @@ class RemotePath:
 		finally:
 			os.remove(tmp_path) # Clean up the temporary file
 
-	def write_text(self, data:str, encoding:str|None="utf-8", errors:str|None="strict", newline:str|None=os.linesep) -> int:
+	def write_text(self, data:str, encoding:str|None = "utf-8", errors:str|None = "strict", newline:str|None = os.linesep) -> int:
 		"""
 		Writes a string to a file on the remote server.
 		Uses a temporary local file for the transfer.
@@ -288,7 +354,7 @@ class RemotePath:
 			os.remove(tmp_path)
 		return 0
 
-	def mkdir(self, mode:int=0o777, parents:bool=False, exist_ok:bool=False) -> None:
+	def mkdir(self, mode:int = 0o777, parents:bool = False, exist_ok:bool = False) -> None:
 		try:
 			parent = self.parent
 			if parents and self != parent and not parent.exists():
@@ -301,70 +367,66 @@ class RemotePath:
 	def rmdir(self) -> None:
 		RemotePath.sftp_connections[self.conn_details].rmdir(str(self))
 
-	def unlink(self, missing_ok:bool=True) -> None:
+	def unlink(self, missing_ok:bool = True) -> None:
 		RemotePath.sftp_connections[self.conn_details].remove(str(self))
 
-	def open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+	def open(self, mode = "r", buffering = -1, encoding = None, errors = None, newline = None):
 		return RemotePath.sftp_connections[self.conn_details].open(str(self), mode="r")
 
-	def rename(self, target:str|os.PathLike[str]) -> "RemotePath":
+	def rename(self, target:"RemotePath") -> "RemotePath":
 		if not isinstance(target, RemotePath):
-			target = type(self)(str(target), self.conn_details)
-			#raise ValueError("target not a RemotePath")
+			#target = type(self)(str(target), self.conn_details)
+			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
 		if self.conn_details != target.conn_details:
-			raise ValueError("netloc mismatch")
+			raise ValueError("Netloc mismatch.")
 		RemotePath.sftp_connections[self.conn_details].rename(str(self), str(target))
 		return target
 
-	def replace(self, target:str|os.PathLike[str]) -> "RemotePath":
+	def replace(self, target:"RemotePath") -> "RemotePath":
 		if not isinstance(target, RemotePath):
-			target = type(self)(str(target), self.conn_details)
-			#raise ValueError("target not a RemotePath")
+			#target = type(self)(str(target), self.conn_details)
+			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
 		if self.conn_details != target.conn_details:
-			raise ValueError("netloc mismatch")
+			raise ValueError("Netloc mismatch.")
 		try:
 			RemotePath.sftp_connections[self.conn_details].remove(str(target))
 		except FileNotFoundError:
 			pass
-		return self.rename(str(target))
+		return self.rename(target)
 
-	def samefile(self, target:str|os.PathLike[str]) -> bool:
+	def samefile(self, target:"RemotePath") -> bool:
 		if not isinstance(target, RemotePath):
-			target = type(self)(str(target), self.conn_details)
-			#raise ValueError("target not a RemotePath")
+			#target = type(self)(str(target), self.conn_details)
+			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
 		if self.conn_details != target.conn_details:
 			# TODO need to consider if self netloc is localhost
 			return False
 		return self.resolve() == target.resolve()
 
-	def relative_to(self, target:str|os.PathLike[str]) -> "RemotePath":
+	def relative_to(self, target:"RemotePath") -> "RemotePath":
 		if not isinstance(target, RemotePath):
-			target = type(self)(str(target), self.conn_details)
-			#raise ValueError("target not a RemotePath")
+			#target = type(self)(str(target), self.conn_details)
+			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
 		if self.conn_details != target.conn_details:
-			raise ValueError("netloc mismatch")
-		new_path_obj = posixpath.relpath(str(self), str(target))
-		return type(self)(new_path_obj, self.conn_details)
+			raise ValueError("Netloc mismatch.")
+		new_path = posixpath.relpath(str(self), str(target))
+		# Path.relative_to() returns a Path object, though a str would probably make more sense
+		return type(self)(new_path, self.conn_details)
 
-	def is_relative_to(self, target:str|os.PathLike[str]) -> bool:
+	def is_relative_to(self, target:"RemotePath") -> bool:
 		if not isinstance(target, RemotePath):
-			target = type(self)(str(target), self.conn_details)
-			#raise ValueError("target not a RemotePath")
+			#target = type(self)(str(target), self.conn_details)
+			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
 		if self.conn_details != target.conn_details:
 			return False
-		return PurePath(self).is_relative_to(target)
+		return PurePosixPath(self).is_relative_to(target)
 
-class RemotePathScanner:
+class _RemotePathScanner:
 	def __init__(self, path:RemotePath):
-		connection = RemotePath.sftp_connections[path.conn_details]
-		#true_path = connection.normalize(path) # TODO not sure if this is needed
-		self.entries = (path / d for d in connection.listdir(str(path)))
+		self.entries = path.iterdir()
 
 	def __iter__(self):
-		return self
-
-	def __next__(self):
-		return self.entries.__next__()
+		return self.entries
 
 	def __enter__(self):
 		return self

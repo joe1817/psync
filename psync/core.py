@@ -59,13 +59,13 @@ class _InputError(ValueError):
 	''' Error that indicates the root cause was due to bad input and that a stack trace does not need to be logged. '''
 	pass
 
-class _Filter:
+class Filter:
 	'''Object that holds a parsed filter string for quicker file filtering.'''
 
-	patterns : list[tuple[bool, re.Pattern]]
+	patterns : list[tuple[bool, str|re.Pattern]]
 
 	@classmethod
-	def tokenize(cls, s:str):
+	def _tokenize(cls, s:str, *, is_glob:bool, glob_is_escaped:bool):
 		escape   :bool = False # used to turn backslash, glob chars, whitespace, quotes into literals; backslash is treated literally for invalid escape sequences
 		s_quotes :bool = False # treat everything within single quotes as literal
 		d_quotes :bool = False # double quotes treat whitespace and single quotes as literal only
@@ -124,7 +124,15 @@ class _Filter:
 					escape = True
 			elif char in ["*", "?", "["]:
 				if escape:
-					token += glob.escape(char)
+					if is_glob:
+						if glob_is_escaped:
+							token += glob.escape(char)
+						else:
+							token += "\\"
+							token += char
+					else:
+						token += "\\"
+						token += char
 					escape = False
 				elif s_quotes:
 					token += glob.escape(char)
@@ -159,55 +167,135 @@ class _Filter:
 					# mimic bash, treat backslash literally
 					token += "\\"
 					escape = False
-					#raise _InputError(f"Unrecognized esacpe sequence: \\{char}")
 				token += char
 
-	def __init__(self, filter_string:str, *, ignore_hidden:bool = False, ignore_case:bool = False):
-		self.patterns = []
-		implicit_dirs: set[str] = set()
-
-		action = True
-
-		for token in _Filter.tokenize(filter_string):
-			if token == True:
-				action = True
-			elif token == False:
-				action = False
-				implicit_dirs = set()
+	@classmethod
+	def _convert_to_glob_string(cls, pattern:str, *, is_glob:bool, glob_is_escaped:bool):
+		glob_string = ""
+		escape = False
+		for c in pattern:
+			if c == "\\":
+				escape = True
+			elif c in ["*", "?", "["]:
+				if is_glob:
+					if escape:
+						if glob_is_escaped:
+							glob_string += glob.translate(c)
+						else:
+							glob_string += "\\"
+							glob_string += c
+						escape = False
+					else:
+						glob_string += c
+				else:
+					if escape:
+						glob_string += "\\"
+						escape = False
+					glob_string += c
 			else:
-				if token[:2] == ".\\" or token[:2] == "./":
-					token = token[2:]
-				if token:
-					if token == ".." or re.search(r"^\.\.[\\/]", token) or re.search(r"[\\/]\.\.[\\/]", token) or re.search(r"[\\/]\.\.$", token):
-						raise _InputError(f"Parent directories ('..') are not supported in pattern arguments to include/exclude: {token}")
-					if os.path.isabs(token):
-						raise _InputError(f"Absolute paths are not supported as arguments to include/exclude: {token}")
-					regex = glob.translate(token, recursive=True, include_hidden=(not ignore_hidden))
-					reobj = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
-					self.patterns.append((action, reobj))
+				if escape:
+					glob_string += "\\"
+					escape = False
+				glob_string += c
+		return glob_string
 
-					# include parent dirs for each include pattern
-					if action:
-						if token.endswith("\\") or token.endswith("/"):
-							token = token[:-1]
-						while True:
-							token = os.path.dirname(token)
-							if token == "":
-								break
-							if token in implicit_dirs:
-								break
-							implicit_dirs.add(token)
-							regex = glob.translate(token + "/", recursive=True, include_hidden=(not ignore_hidden))
-							reobj = re.compile(regex)
-							self.patterns.append((action, reobj))
+	@classmethod
+	def _parse_pattern(cls, action:bool, pattern:str, *, ignore_hidden:bool, ignore_case:bool, is_glob:bool, glob_is_escaped:bool):
+		sep = f"{os.sep}/"
+		if pattern[:2] == f".{os.sep}" or pattern[:2] == "./":
+			pattern = pattern[2:].lstrip(sep)
+		if pattern:
+			# don't allow escaped lone - and +
+			# \- and \+ are valid filenames in Linux
+			# and Windows shouldn't have a unique escape sequence if it can be avoided
+			if pattern == r"\-" or pattern == r"\+":
+				raise _InputError(f"Pattern {pattern} is invalid. You probably meant: ./{pattern[1]}")
+			if pattern == ".." or re.search(rf"^\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.$", pattern):
+				raise _InputError(f"Parent directories ('..') are not supported in filter: {pattern}")
+			glob_pattern = Filter._convert_to_glob_string(pattern, is_glob=is_glob, glob_is_escaped=glob_is_escaped)
+			if os.path.isabs(glob_pattern) or glob_pattern[0] in sep:
+				# just assume anything starting with a path separator is an absolute path
+				raise _InputError(f"Absolute paths are not supported in filter: {pattern}")
+			regex = glob.translate(glob_pattern, recursive=True, include_hidden=(not ignore_hidden))
+			matcher = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
+			return (action, matcher)
+		else:
+			return None
 
-	def filter(self, relpath:str, default:bool = False) -> bool:
+	def allow(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "Filter":
+		for pattern in patterns:
+			filter = Filter._parse_pattern(True, pattern,
+				ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
+				ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
+				is_glob = is_glob if is_glob is not None else self.is_glob,
+				glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
+			)
+			if filter:
+				self.filters.append(filter)
+
+				pattern = pattern.rstrip("/").rstrip(os.sep)
+				while True:
+					pattern = os.path.dirname(pattern)
+					if pattern == "" or pattern == os.sep or pattern == "/":
+						break
+					if pattern in self.implicit_dirs:
+						break
+					self.implicit_dirs.add(pattern)
+					filter = Filter._parse_pattern(True, pattern + "/",
+						ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
+						ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
+						is_glob = is_glob if is_glob is not None else self.is_glob,
+						glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
+					)
+					if filter:
+						self.filters.append(filter)
+					else:
+						break
+		return self
+
+	def reject(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "Filter":
+		for pattern in patterns:
+			filter = Filter._parse_pattern(False, pattern,
+				ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
+				ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
+				is_glob = is_glob if is_glob is not None else self.is_glob,
+				glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
+			)
+			if filter:
+				self.filters.append(filter)
+				self.implicit_dirs = set()
+		return self
+
+	def __init__(self, filter_string:str = "", *, ignore_hidden:bool = False, ignore_case:bool = False, is_glob:bool = True, glob_is_escaped:bool = False, default:bool = False):
+		self.ignore_hidden   = ignore_hidden
+		self.ignore_case     = ignore_case
+		self.is_glob         = is_glob
+		self.glob_is_escaped = glob_is_escaped
+		self.default         = default
+
+		self.implicit_dirs: set[str] = set()
+		self.filters : list[stuple[bool, re.Pattern]] = []
+
+		if filter_string:
+			action = True
+			for token in Filter._tokenize(filter_string, is_glob=is_glob, glob_is_escaped=glob_is_escaped):
+				if token == True:
+					action = True
+				elif token == False:
+					action = False
+					# self.implicit_dirs = set()
+				elif action:
+					self.allow(token)
+				else:
+					self.reject(token)
+
+	def filter(self, relpath:str, default:bool|None = None) -> bool:
 		'''Compare the file path against the filter string.'''
 
-		for action, reobj in self.patterns:
-			if reobj.match(relpath):
+		for action, matcher in self.filters:
+			if matcher.match(relpath):
 				return action
-		return default
+		return default if default is not None else self.default
 
 @dataclass(frozen=True)
 class _Metadata:
@@ -705,7 +793,7 @@ def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden
 		sftp_compat     (bool) : Whether to work in SFTP compatibility mode, which will truncate milliseconds off the file modification times, treat file names case-sensitively on Windows, and return paths with forward slashes. (Defaults to `False`.)
 	'''
 
-	f = _Filter(filter, ignore_hidden=ignore_hidden)
+	f = Filter(filter, ignore_hidden=ignore_hidden)
 
 	convert_sep = sftp_compat and os.sep == "\\" and not isinstance(root, RemotePath)
 	display_sep = "/" if sftp_compat else os.sep

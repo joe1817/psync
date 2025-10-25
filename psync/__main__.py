@@ -5,7 +5,8 @@ import sys
 import argparse
 import traceback
 
-from .core import sync, Results
+from .core import sync
+from .data import Results
 from .sftp import RemotePath
 
 class _ArgParser:

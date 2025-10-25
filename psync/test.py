@@ -13,8 +13,9 @@ import unittest
 import doctest
 from pathlib import Path
 
-from . import core, sftp
+from . import core, data, helpers, sftp
 from . import __main__ as main
+from .filter import Filter
 
 logger = logging.getLogger("psync")
 
@@ -104,6 +105,8 @@ def create_file_structure(root_dir:Path, structure:dict, *, _symlinks:dict|None 
 
 def load_tests(loader, tests, ignore):
 	tests.addTests(doctest.DocTestSuite(core))
+	tests.addTests(doctest.DocTestSuite(data))
+	tests.addTests(doctest.DocTestSuite(helpers))
 	tests.addTests(doctest.DocTestSuite(sftp))
 	return tests
 
@@ -118,7 +121,7 @@ class TestBackup(unittest.TestCase):
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_filter(self):
-		f = core._Filter(r"+ **")
+		f = Filter(r"+ **")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -129,7 +132,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = core._Filter(r"+ **/*")
+		f = Filter(r"+ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -140,7 +143,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = core._Filter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
+		f = Filter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -151,7 +154,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("a/__pycache__/"))
 		self.assertFalse(f.filter("a/b/__pycache__/"))
 
-		f = core._Filter(r"+ audio/music/**/*.flac - **/*/ **/*")
+		f = Filter(r"+ audio/music/**/*.flac - **/*/ **/*")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -161,7 +164,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("audio/audiobooks/"))
 		self.assertFalse(f.filter("audio/music/OST/Star Wars/cover.jpg"))
 
-		f = core._Filter(r"- audio/music/**/*.wav + audio/music/**")
+		f = Filter(r"- audio/music/**/*.wav + audio/music/**")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -171,7 +174,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("video/"))
 		self.assertFalse(f.filter("audio/audiobooks/"))
 
-		f = core._Filter(r"places.sqlite key4.db logins.json cookies.sqlite prefs.js")
+		f = Filter(r"places.sqlite key4.db logins.json cookies.sqlite prefs.js")
 		self.assertTrue(f.filter("places.sqlite"))
 		self.assertTrue(f.filter("key4.db"))
 		self.assertTrue(f.filter("logins.json"))
@@ -180,7 +183,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("storage.sqlite"))
 		self.assertFalse(f.filter("storage/"))
 
-		f = core._Filter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
+		f = Filter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
 		self.assertTrue(f.filter("**/a b"))
 		self.assertFalse(f.filter("a b"))
 		self.assertFalse(f.filter("1/2/a b"))
@@ -191,13 +194,13 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("Joe's File"))
 		self.assertFalse(f.filter("a"))
 
-		f = core._Filter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
+		f = Filter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
 		self.assertTrue(f.filter("'a'"))
 		self.assertTrue(f.filter("\"b\""))
 		self.assertTrue(f.filter("x 1y ?"))
 		self.assertFalse(f.filter("x 1y 2"))
 
-		f = core._Filter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
+		f = Filter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("b/a"))
 		self.assertTrue(f.filter("b/a/a"))
@@ -209,7 +212,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("b/b/y"))
 		self.assertFalse(f.filter("aa/y"))
 
-		f = core._Filter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
+		f = Filter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("A"))
 		self.assertTrue(f.filter("b"))
@@ -221,12 +224,12 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("d/.a"))
 		self.assertFalse(f.filter("d/.A"))
 
-		f = core._Filter(r"./a/ ./a/b")
+		f = Filter(r"./a/ ./a/b")
 		self.assertTrue(f.filter("a/"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertFalse(f.filter("c"))
 
-		f = core._Filter(r"a/ a/b")
+		f = Filter(r"a/ a/b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter("a/"))
 			self.assertTrue(f.filter("a\\"))
@@ -240,7 +243,7 @@ class TestBackup(unittest.TestCase):
 			self.assertFalse(f.filter("a\\b"))
 			self.assertFalse(f.filter("c"))
 
-		f = core._Filter(r"a\\ a\b")
+		f = Filter(r"a\\ a\b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter("a/"))
 			self.assertTrue(f.filter("a\\"))
@@ -254,7 +257,7 @@ class TestBackup(unittest.TestCase):
 			self.assertTrue(f.filter("a\\b"))
 			self.assertFalse(f.filter("c"))
 
-		f = core._Filter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
+		f = Filter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
 		self.assertTrue(f.filter("- a"))
 		self.assertTrue(f.filter("-a"))
 		self.assertTrue(f.filter("--"))
@@ -265,21 +268,22 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a'b"))
 		self.assertFalse(f.filter("b"))
 
-		f = core._Filter(r"'-'")
+		f = Filter(r"'-'")
 		self.assertTrue(f.filter("-"))
 		self.assertFalse(f.filter("a"))
 
-		f = core._Filter("\"-\"")
+		f = Filter("\"-\"")
 		self.assertTrue(f.filter("-"))
 		self.assertFalse(f.filter("a"))
 
-		f = core._Filter(r"\-")
-		self.assertFalse(f.filter("-"))
-		self.assertTrue(f.filter("\\-"))
-		self.assertFalse(f.filter("a"))
+		self.assertRaises(ValueError, Filter, r"+ \-")
+		self.assertRaises(ValueError, Filter, r"+ 'a")
+		self.assertRaises(ValueError, Filter,  "+ a\\")
+		self.assertRaises(ValueError, Filter,  "+ /a")
 
-		self.assertRaises(core._InputError, core._Filter, r"+ 'a")
-		self.assertRaises(core._InputError, core._Filter,  "+ a\\")
+		if os.sep == "\\":
+			self.assertRaises(ValueError, Filter,  "+ \\/a")
+			self.assertRaises(ValueError, Filter,  "+ \\\\a")
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

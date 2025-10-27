@@ -55,10 +55,6 @@ class _LogFileFormatter(logging.Formatter):
 		formatted_message = super().format(record)
 		return formatted_message
 
-class _InputError(ValueError):
-	''' Error that indicates the root cause was due to bad input and that a stack trace does not need to be logged. '''
-	pass
-
 class Filter:
 	'''Object that holds a parsed filter string for quicker file filtering.'''
 
@@ -73,7 +69,7 @@ class Filter:
 		tokstart :int = 0   # used to tell if a - or + token were surrounded by quotes
 
 		if "\0" in s:
-			raise _InputError("Invalid null character in filter string")
+			raise ValueError("Invalid null character in filter string")
 		s += "\0"
 
 		for i, char in enumerate(s):
@@ -100,11 +96,11 @@ class Filter:
 					tokstart = i+1
 			elif char == "\0":
 				if escape:
-					raise _InputError("Unterminated escape sequence in filter string")
+					raise ValueError("Unterminated escape sequence in filter string")
 				elif s_quotes:
-					raise _InputError("Unclosed quotes in filter string")
+					raise ValueError("Unclosed quotes in filter string")
 				elif d_quotes:
-					raise _InputError("Unclosed quotes in filter string")
+					raise ValueError("Unclosed quotes in filter string")
 				elif token:
 					if token == "+":
 						yield True if i == tokstart+1 else "+"
@@ -209,13 +205,13 @@ class Filter:
 			# \- and \+ are valid filenames in Linux
 			# and Windows shouldn't have a unique escape sequence if it can be avoided
 			if pattern == r"\-" or pattern == r"\+":
-				raise _InputError(f"Pattern {pattern} is invalid. You probably meant: ./{pattern[1]}")
+				raise ValueError(f"Pattern {pattern} is invalid. You probably meant: ./{pattern[1]}")
 			if pattern == ".." or re.search(rf"^\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.$", pattern):
-				raise _InputError(f"Parent directories ('..') are not supported in filter: {pattern}")
+				raise ValueError(f"Parent directories ('..') are not supported in filter: {pattern}")
 			glob_pattern = Filter._convert_to_glob_string(pattern, is_glob=is_glob, glob_is_escaped=glob_is_escaped)
 			if os.path.isabs(glob_pattern) or glob_pattern[0] in sep:
 				# just assume anything starting with a path separator is an absolute path
-				raise _InputError(f"Absolute paths are not supported in filter: {pattern}")
+				raise ValueError(f"Absolute paths are not supported in filter: {pattern}")
 			regex = glob.translate(glob_pattern, recursive=True, include_hidden=(not ignore_hidden))
 			matcher = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
 			return (action, matcher)
@@ -533,7 +529,7 @@ def sync(
 		if log_file is not None:
 			if log_file.exists():
 				if not log_file.is_file():
-					raise _InputError(f"'log' is not a file: {log_file}")
+					raise ValueError(f"'log' is not a file: {log_file}")
 				tmp_log_file = log_file
 			else:
 				with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as tmp_log:
@@ -565,7 +561,7 @@ def sync(
 			try:
 				src_root = RemotePath.create(str(src))
 			except (ValueError, ImportError) as e:
-				raise _InputError(str(e)) from e
+				raise ValueError(str(e)) from e
 		else:
 			src = os.path.expanduser(src)
 			src = os.path.expandvars(src)
@@ -574,7 +570,7 @@ def sync(
 			try:
 				dst_root = RemotePath.create(str(dst))
 			except (ValueError, ImportError) as e:
-				raise _InputError(str(e)) from e
+				raise ValueError(str(e)) from e
 		else:
 			dst = os.path.expanduser(dst)
 			dst = os.path.expandvars(dst)
@@ -588,7 +584,7 @@ def sync(
 			try:
 				trash_root = RemotePath.create(str(trash))
 			except (ValueError, ImportError) as e:
-				raise _InputError(str(e)) from e
+				raise ValueError(str(e)) from e
 		else:
 			trash = os.path.expanduser(trash)
 			trash = os.path.expandvars(trash)
@@ -598,26 +594,26 @@ def sync(
 		# st_dev is not available over SFTP
 		if trash_root is not None and not isinstance(dst_root, RemotePath) and not isinstance(trash_root, RemotePath) and trash_root.exists():
 			if os.stat(trash_root).st_dev != os.stat(dst_root).st_dev:
-				raise _InputError(f"'trash_root' is not on the same file system as 'dst_root': {trash_root}")
+				raise ValueError(f"'trash_root' is not on the same file system as 'dst_root': {trash_root}")
 
 		if src_root.exists() and not src_root.is_dir():
-			raise _InputError(f"'src' is not a directory: {src_root}")
+			raise ValueError(f"'src' is not a directory: {src_root}")
 		if dst_root.exists() and not dst_root.is_dir():
-			raise _InputError(f"'dst' is not a directory: {dst_root}")
+			raise ValueError(f"'dst' is not a directory: {dst_root}")
 		# This isn't a problem because dirs are walked in their entirety before operations are performed
 		# If this changes in the furture, should also check that src or dst isn't nested in the other
 		#if src_root.resolve() == dst_root.resolve():
-		#	raise _InputError(f"'src' and 'dst' point to the same directory")
+		#	raise ValueError(f"'src' and 'dst' point to the same directory")
 		if trash_root is not None and trash_root.exists() and not trash_root.is_dir():
-			raise _InputError(f"'trash_root' is not a directory: {trash_root}")
+			raise ValueError(f"'trash_root' is not a directory: {trash_root}")
 		if trash_root and delete_files:
-			raise _InputError("Mutually exclusive arguments: 'trash_root' and 'delete_files'")
+			raise ValueError("Mutually exclusive arguments: 'trash_root' and 'delete_files'")
 
 		if ignore_symlinks and follow_symlinks:
-			raise _InputError("Mutually exclusive arguments: 'ignore_symlinks' and 'follow_symlinks'")
+			raise ValueError("Mutually exclusive arguments: 'ignore_symlinks' and 'follow_symlinks'")
 
 		if rename_threshold is not None and rename_threshold < 0:
-			raise _InputError(f"'rename_threshold' must be non-negative: {rename_threshold}")
+			raise ValueError(f"'rename_threshold' must be non-negative: {rename_threshold}")
 
 		sftp_compat = isinstance(src_root, RemotePath) or isinstance(dst_root, RemotePath)
 		filter = filter.replace("\\", "/") if sftp_compat and os.sep == "\\" else filter
@@ -725,7 +721,7 @@ def sync(
 
 	except KeyboardInterrupt:
 		results.status = Results.Status.INTERRUPTED_BY_USER
-	except _InputError as e:
+	except ValueError as e:
 		logger.info("")
 		logger.critical(f"Input Error: {e}", exc_info=debug)
 		results.status = Results.Status.INPUT_ERROR

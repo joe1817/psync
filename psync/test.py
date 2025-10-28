@@ -202,6 +202,16 @@ class TestBackup(unittest.TestCase):
 			sync.log_level = logging.INFO
 			self.assertEqual(sync.log_level, logging.INFO)
 
+			sync.no_header = True
+			self.assertEqual(sync.no_header, True)
+			sync.no_header = False
+			self.assertEqual(sync.no_header, False)
+
+			sync.no_footer = True
+			self.assertEqual(sync.no_footer, True)
+			sync.no_footer = False
+			self.assertEqual(sync.no_footer, False)
+
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_filter(self):

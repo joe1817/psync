@@ -51,6 +51,10 @@ class _ArgParser:
 	print_level.add_argument("-q", action="count", default=0, help="Shorthand for --print-level WARNING (-q) and --print-level CRITICAL (-qq).")
 	print_level.add_argument("-p", "--print-level", type=str, default="INFO", help="Log level for printing to console.")
 
+	parser.add_argument("-nh", "--no-header", action="store_true", default=False, help="Skip logging header information.")
+	parser.add_argument("-nf", "--no-footer", action="store_true", default=False, help="Skip logging footer information.")
+	parser.add_argument("-nhf", "--no-header-or-footer", action="store_true", default=False, help="Skip logging header and footer information.")
+
 	@staticmethod
 	def parse(args:list[str]) -> argparse.Namespace:
 		log_levels = {"DEBUG": logging.DEBUG, "INFO":logging.INFO, "WARNING":logging.WARNING, "WARN":logging.WARNING, "ERROR":logging.ERROR, "ERR":logging.ERROR, "CRITICAL":logging.CRITICAL, "CRIT":logging.CRITICAL}
@@ -112,6 +116,8 @@ def _sync_cmd(args:list[str]) -> None:
 			log_file         = parsed_args.log,
 			log_level        = parsed_args.log_level,
 			print_level      = parsed_args.print_level,
+			no_header        = parsed_args.no_header or parsed_args.no_header_or_footer,
+			no_footer        = parsed_args.no_footer or parsed_args.no_header_or_footer,
 		)
 	except (TypeError, ValueError) as e:
 		logger.error(str(e), exc_info=False) # assume input error, don't print stack trace

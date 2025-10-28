@@ -18,8 +18,8 @@ from collections import Counter
 from .filter import Filter, PathFilter
 from .helpers import _reverse_dict, _human_readable_size, _error_summary
 from .sftp import RemotePath, _RemotePathScanner
-from .log import logger, _DebugInfoFilter, _NonEmptyFilter, _LogFileFormatter
 from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
+from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _LogFileFormatter
 
 PathLikeType = str | os.PathLike[str]
 PathType = Path | RemotePath
@@ -240,6 +240,8 @@ class Sync:
 		"log_file",
 		"log_level",
 		"print_level",
+		"no_header",
+		"no_footer",
 	]
 
 	def __init__(self, src:PathLikeType, dst:PathLikeType, **kwargs):
@@ -265,6 +267,8 @@ class Sync:
 			log    (str or PathLike) : The path of the log file to use. It will be created if it does not exist. A value of "auto" means a tempfile will be used for the log, and it will be copied to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
 			log_level          (int) : Log level for logging to file. (Default to `logging.DEBUG`.)
 			print_level        (int) : Log level for printing to console. (Default to `logging.INFO`.)
+			no_header         (bool) : Whether to skip logging header information. (Defaults to `False`.)
+			no_footer         (bool) : Whether to skip logging footer information. (Defaults to `False`.)
 
 		Returns
 			A `Results` object containing various statistics.
@@ -312,6 +316,8 @@ class Sync:
 		self.handler_stdout.addFilter(_DebugInfoFilter())
 		self.handler_stdout.setLevel(logging.INFO)
 		self.handler_stderr.setLevel(logging.WARNING)
+		self.filter_tag = _TagFilter()
+		self.handler_stdout.addFilter(self.filter_tag)
 		self.logger.addHandler(self.handler_stdout)
 		self.logger.addHandler(self.handler_stderr)
 
@@ -651,6 +657,32 @@ class Sync:
 			raise TypeError(f"Bad type for property 'print_level' (expected int): {val}")
 		self.handler_stdout.level = val
 		self.handler_stderr.level = max(val, logging.WARNING)
+
+	@property
+	def no_header(self):
+		return self.filter_tag[_RecordTag.HEADER]
+
+	@no_header.setter
+	def no_header(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'no_header' (expected bool): {val}")
+		self.filter_tag[_RecordTag.HEADER] = val
+
+	@property
+	def no_footer(self):
+		return self.filter_tag[_RecordTag.FOOTER]
+
+	@no_footer.setter
+	def no_footer(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'no_footer' (expected bool): {val}")
+		self.filter_tag[_RecordTag.FOOTER] = val
 
 	def close_file_handler(self) -> None:
 		if self.handler_file:
@@ -993,13 +1025,16 @@ class Sync:
 			raise StateError("Sync object state is not READY.")
 
 		try:
-			self.logger.debug(f"Starting backup: {self.src=} {self.dst=} {self.filter=} {self.trash=} {self.delete_files=} {self.force_update=} {self.metadata_only=} {self.rename_threshold=} {self.ignore_symlinks=} {self.follow_symlinks=} {self.dry_run=} {self.log_file=} {self.log_level=} {self.print_level=} {self.sftp_compat=}".replace("self.", ""))
+			HEADER = _RecordTag.HEADER.dict()
+			FOOTER = _RecordTag.FOOTER.dict()
+
+			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=!s}, {self.trash=}, {self.delete_files=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
 			self.logger.debug("")
 
 			width = max(len(str(self.src)), len(str(self.dst)), 7) + 3
-			self.logger.info("   " + str(self.src))
-			self.logger.info("-> " + str(self.dst))
-			self.logger.info("-" * width)
+			self.logger.info("   " + str(self.src), extra=HEADER)
+			self.logger.info("-> " + str(self.dst), extra=HEADER)
+			self.logger.info("-" * width, extra=HEADER)
 
 			src_files = self._scandir(self.src)
 			if self.dst.exists():
@@ -1036,24 +1071,24 @@ class Sync:
 			self.logger.critical("An unexpected error occurred.", exc_info=True)
 			self.results.status = Results.Status.INTERRUPTED_BY_ERROR
 		finally:
-			self.logger.info("-" * width)
+			self.logger.info("-" * width, extra=FOOTER)
 			for line in self.results.summary():
-				self.logger.info(line)
+				self.logger.info(line, extra=FOOTER)
 
 			if self.results.err_count:
-				self.logger.info("")
-				self.logger.info(f"There were {self.results.err_count} errors.")
+				self.logger.info("", extra=FOOTER)
+				self.logger.info(f"There were {self.results.err_count} errors.", extra=FOOTER)
 				if self.results.err_count <= 10:
-					self.logger.info("Errors are reprinted below for convenience.")
+					self.logger.info("Errors are reprinted below for convenience.", extra=FOOTER)
 					for error in self.results.errors:
-						self.logger.info(error)
+						self.logger.info(error, extra=FOOTER)
 
 			if self.log_file:
-				self.logger.info("")
-				self.logger.info(f"Log file: {self.log_file}")
+				self.logger.info("", extra=FOOTER)
+				self.logger.info(f"Log file: {self.log_file}", extra=FOOTER)
 				self.close_file_handler()
 
-			self.logger.info("")
+			self.logger.info("", extra=FOOTER)
 			self._state = Sync._SyncState.TERMINATED
 
 		return self.results

@@ -17,6 +17,7 @@ psync is a simple utility to copy files from one folder to another.
 
 ## Dependencies
 - paramiko (only if you intend to use SFTP)
+- watchdog (only if you intend to watch for filesystem changes)
 
 ## Examples
 
@@ -35,6 +36,10 @@ psync is a simple utility to copy files from one folder to another.
 `python -m psync src user@192.168.1.100/dst`
 
 &emsp; ↳ Sync using SFTP the local `src/` directory to the remote `dst/` directory.
+
+`python -m psync src dst -w -x -R 0 -nhf`
+
+&emsp; ↳ Watch the `src/` directory and sync it to `dst/` whenever there is a filesystem change. Delete files in `dst/`. Rename files of any size. Don't print header or footer for these sync operations.
 
 `python -m psync src dst !args.txt`
 

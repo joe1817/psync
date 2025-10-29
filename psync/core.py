@@ -328,6 +328,14 @@ class Sync:
 
 		self._state = Sync._SyncState.READY
 
+	def reset(self):
+		'''Discards results and allows this `Sync` object to be run again.'''
+
+		self.results = Results(self)
+		if self._state != Sync._SyncState.INVALID:
+			self._state = Sync._SyncState.READY
+
+
 	@property
 	def src(self) -> PathType:
 		return self._src

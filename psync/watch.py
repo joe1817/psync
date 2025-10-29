@@ -1,0 +1,108 @@
+# Copyright (c) 2025 Joe Walter
+# GNU General Public License v3.0
+
+import os
+from pathlib import Path
+
+from .core import Sync
+from .filter import PathFilter
+from .log import logger
+from .errors import UnsupportedOperationError
+
+try:
+	from watchdog.observers import Observer
+	from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileDeletedEvent, FileModifiedEvent, FileMovedEvent
+except ImportError:
+	pass
+
+def watch(sync:Sync):
+	if sync.sftp_compat:
+		raise UnsupportedOperationError("Can only watch local directories.")
+	else:
+		_LocalWatcher(sync).watch()
+
+class _LocalWatcher(FileSystemEventHandler):
+
+	def __init__(self, sync:Sync):
+		if "Observer" not in globals():
+			raise ImportError("Watchdog package is needed to watch for filesystem changes. Install it with: pip install watchdog")
+		self.sync = sync
+
+	def watch(self):
+		logger.info(f"  Watching: {self.sync.src} -> {self.sync.dst}")
+		logger.info( "  Press CTRL-C to quit.")
+		logger.info( "  ---------------------")
+		observer = Observer()
+		if isinstance(self.sync.src, Path):
+			observer.schedule(self, str(self.sync.src), recursive=True)
+		else:
+			raise UnsupportedOperationError("Can only watch local directories.")
+		observer.start()
+		try:
+			while observer.is_alive():
+				observer.join(1)
+		finally:
+			observer.stop()
+			observer.join()
+
+	def on_created(self, event):
+		logger.debug(f"{type(event)=} {event.src_path=}")
+		self.sync.reset()
+		relpath = os.path.relpath(event.src_path, self.sync.src)
+		if isinstance(event, FileCreatedEvent):
+			self.sync.filter = PathFilter(is_glob=False).allow(relpath)
+			self.sync.run()
+		else:
+			dir_glob = PathFilter._convert_to_glob_string(relpath, is_glob=False, glob_is_escaped=False)
+			self.sync.filter = PathFilter().allow(relpath+"/", is_glob=False).allow(os.path.join(dir_glob, "**", "*"), is_glob=True)
+			self.sync.run()
+
+	def on_deleted(self, event):
+		logger.debug(f"{type(event)=} {event.src_path=}")
+		self.sync.reset()
+		relpath = os.path.relpath(event.src_path, self.sync.src)
+		# Bug: Watchdog is currently raising a FileDeletedEvent even when directories are deleted.
+		# Until this is fixed, the correct operation is determined through the type of the dst file.
+		dst_path = os.path.join(self.sync.dst, relpath)
+		if os.path.isfile(dst_path):
+			if self.sync.delete_files or self.sync.trash:
+				self.sync.filter = PathFilter(is_glob=False).allow(relpath)
+				self.sync.run()
+		elif os.path.isdir(dst_path):
+			if self.sync.delete_files or self.sync.trash:
+				dir_glob = PathFilter._convert_to_glob_string(relpath, is_glob=False, glob_is_escaped=False)
+				self.sync.filter = PathFilter().allow(relpath+"/", is_glob=False).allow(os.path.join(dir_glob, "**", "*"), is_glob=True)
+				self.sync.run()
+
+	def on_modified(self, event):
+		logger.debug(f"{type(event)=} {event.src_path=}")
+		self.sync.reset()
+		relpath = os.path.relpath(event.src_path, self.sync.src)
+		if isinstance(event, FileModifiedEvent):
+			self.sync.filter = PathFilter(is_glob=False).allow(relpath)
+			self.sync.run()
+		else:
+			pass
+
+	def on_moved(self, event):
+		logger.debug(f"{type(event)=} {event.src_path=} {event.dest_path=}")
+		self.sync.reset()
+		src_relpath = os.path.relpath(event.src_path, self.sync.src)
+		dst_relpath = os.path.relpath(event.dest_path, self.sync.src)
+		if isinstance(event, FileMovedEvent):
+			self.sync.filter = PathFilter(is_glob=False).allow(src_relpath, dst_relpath)
+			self.sync.run()
+		else:
+			if self.sync.delete_files or self.sync.trash:
+				src_dir_glob = PathFilter._convert_to_glob_string(src_relpath, is_glob=False, glob_is_escaped=False)
+				dst_dir_glob = PathFilter._convert_to_glob_string(dst_relpath, is_glob=False, glob_is_escaped=False)
+				self.sync.filter = PathFilter().allow(
+					src_relpath+"/",
+					dst_relpath+"/",
+					is_glob=False,
+				).allow(
+					os.path.join(src_dir_glob, "**", "*"),
+					os.path.join(dst_dir_glob, "**", "*"),
+					is_glob=True,
+				)
+				self.sync.run()

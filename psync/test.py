@@ -13,7 +13,7 @@ import unittest
 import doctest
 from pathlib import Path
 
-from . import core, filter, helpers, sftp
+from . import core, filter, helpers, sftp, watch
 from . import __main__ as main
 from .filter import PathFilter
 
@@ -108,6 +108,7 @@ def load_tests(loader, tests, ignore):
 	tests.addTests(doctest.DocTestSuite(filter))
 	tests.addTests(doctest.DocTestSuite(helpers))
 	tests.addTests(doctest.DocTestSuite(sftp))
+	tests.addTests(doctest.DocTestSuite(watch))
 	return tests
 
 class TestBackup(unittest.TestCase):

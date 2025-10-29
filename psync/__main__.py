@@ -9,6 +9,7 @@ import argparse
 from .core import Sync, Results
 from .filter import PathFilter
 from .sftp import RemotePath
+from .watch import watch
 from .log import logger
 
 class _ArgParser:
@@ -126,11 +127,16 @@ def _sync_cmd(args:list[str]) -> None:
 		logger.error(str(e), exc_info=False)
 		return
 
-	sync.run()
+	if parsed_args.watch:
+		watch(sync)
+	else:
+		sync.run()
 
 if __name__ == "__main__":
 	try:
 		_sync_cmd(sys.argv[1:])
+	except ImportError as e:
+		logger.critical(str(e))
 	except KeyboardInterrupt:
 		pass
 	#except Exception:

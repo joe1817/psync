@@ -36,11 +36,15 @@ class _Entry:
 	'''Filesystem entries yielded by `_scandir()`.'''
 
 	normpath : str # normcased and replaced \\ -> /
-	path     : str
+	path     : str # relpath
 
 @dataclass(frozen=True)
 class _File(_Entry):
 	meta     : _Metadata
+
+@dataclass(frozen=True)
+class _NonEmptyDir(_Entry):
+	pass
 
 @dataclass(frozen=True)
 class _EmptyDir(_Entry):
@@ -88,11 +92,6 @@ class RenameFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		_move(self.src, self.dst)
-		try:
-			for path in _delete_empty_dirs(self.src.parent, sync.dst):
-				sync.logger.debug(f"deleting empty dir: {path}")
-		except DirDeleteError as e:
-			sync.logger.warning(str(e))
 
 @dataclass(frozen=True)
 class DeleteFileOperation(Operation):
@@ -101,11 +100,6 @@ class DeleteFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		self.src.unlink()
-		try:
-			for path in _delete_empty_dirs(self.src.parent, sync.dst):
-				sync.logger.debug(f"deleting empty dir: {path}")
-		except DirDeleteError as e:
-			sync.logger.warning(str(e))
 
 @dataclass(frozen=True)
 class TrashFileOperation(Operation):
@@ -115,11 +109,6 @@ class TrashFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		_move(self.src, self.dst)
-		try:
-			for path in _delete_empty_dirs(self.src.parent, sync.dst):
-				sync.logger.debug(f"deleting empty dir: {path}")
-		except DirDeleteError as e:
-			sync.logger.warning(str(e))
 
 @dataclass(frozen=True)
 class CreateDirOperation(Operation):
@@ -136,10 +125,9 @@ class DeleteDirOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		try:
-			for path in _delete_empty_dirs(self.src, sync.dst):
-				sync.logger.debug(f"deleting empty dir: {path}")
-		except DirDeleteError as e:
-			sync.logger.warning(str(e))
+			self.src.rmdir()
+		except OSError as e:
+			raise DirDeleteError(str(e)) from e
 
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
@@ -791,12 +779,18 @@ class Sync:
 				normed_dir_relpath = os.path.normcase(normed_dir_relpath)
 
 			# empty directory
-			if dir_relpath != "." and not file_entries and not dir_entries and filter(dir_relpath + display_sep):
-				yield _EmptyDir(
-					normpath = normed_dir_relpath,
-					path     = dir_relpath,
-				)
-				continue
+			if dir_relpath != "." and filter(dir_relpath + display_sep):
+				if file_entries or dir_entries:
+					yield _NonEmptyDir(
+						normpath = normed_dir_relpath,
+						path     = dir_relpath,
+					)
+				else:
+					yield _EmptyDir(
+						normpath = normed_dir_relpath,
+						path     = dir_relpath,
+					)
+					continue
 
 			# prune search tree
 			i = 0
@@ -857,6 +851,9 @@ class Sync:
 		src_relpaths = set()
 		dst_relpaths = set()
 
+		src_dirs = set()
+		dst_dirs = set()
+
 		src_empty_dirs = set()
 		dst_empty_dirs = set()
 
@@ -865,7 +862,10 @@ class Sync:
 			if isinstance(src_entry, _File):
 				src_meta[src_entry.normpath] = src_entry.meta
 				src_relpaths.add(src_entry.normpath)
-			elif isinstance(src_entry, _EmptyDir):
+			elif isinstance(src_entry, _NonEmptyDir):
+				src_dirs.add(src_entry.normpath)
+			else:
+				src_dirs.add(src_entry.normpath)
 				src_empty_dirs.add(src_entry.normpath)
 
 		for dst_entry in dst_files:
@@ -873,7 +873,10 @@ class Sync:
 			if isinstance(dst_entry, _File):
 				dst_meta[dst_entry.normpath] = dst_entry.meta
 				dst_relpaths.add(dst_entry.normpath)
-			elif isinstance(dst_entry, _EmptyDir):
+			elif isinstance(dst_entry, _NonEmptyDir):
+				dst_dirs.add(dst_entry.normpath)
+			else:
+				dst_dirs.add(dst_entry.normpath)
 				dst_empty_dirs.add(dst_entry.normpath)
 
 		self.logger.debug(f"{len(src_relpaths)=}")
@@ -893,15 +896,39 @@ class Sync:
 		self.logger.debug(f"{len(src_only_relpaths)=}")
 		self.logger.debug(f"{len(dst_only_relpaths)=}")
 		self.logger.debug(f"{len(both_relpaths)=}")
+		self.logger.debug(f"{len(src_dirs)=}")
+		self.logger.debug(f"{len(dst_dirs)=}")
+		self.logger.debug(f"{len(src_empty_dirs)=}")
+		self.logger.debug(f"{len(dst_empty_dirs)=}")
 
 		self.logger.debug(f"{list(islice(src_only_relpaths, 10))=}")
 		self.logger.debug(f"{list(islice(dst_only_relpaths, 10))=}")
 		self.logger.debug(f"{list(islice(both_relpaths, 10))=}")
+		self.logger.debug(f"{list(islice(src_dirs, 10))=}")
+		self.logger.debug(f"{list(islice(dst_dirs, 10))=}")
+		self.logger.debug(f"{list(islice(src_empty_dirs, 10))=}")
+		self.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
+
+		def _automatic_dir_delete_ops(deleted_relpath:str):
+			# from closure: src_dirs, dst_real_names
+			relpath = os.path.dirname(deleted_relpath) # should keep / separators on Windows
+			while relpath and relpath not in src_dirs:
+				relpath_real = dst_real_names[relpath]
+				dir = self.dst / relpath_real
+				if any(dir.iterdir()):
+					break
+				yield DeleteDirOperation(
+					src = dir,
+					dst = None,
+					byte_diff = 0,
+					summary = f"- {relpath_real}{display_sep}"
+				)
+				relpath = os.path.dirname(relpath)
 
 		# Delete empty directories now in case any new files needs to take their places
-		dst_only_empty_dirs = dst_empty_dirs.difference(src_empty_dirs)
-		for relpath in dst_only_empty_dirs:
-			dst_relpath_real = dst_real_names[relpath]
+		dst_only_empty_dirs = dst_empty_dirs.difference(src_dirs)
+		for dst_relpath in dst_only_empty_dirs:
+			dst_relpath_real = dst_real_names[dst_relpath]
 			src = self.dst / dst_relpath_real
 			assert not any(src.iterdir())
 			yield DeleteDirOperation(
@@ -910,6 +937,7 @@ class Sync:
 				byte_diff = 0,
 				summary = f"- {dst_relpath_real}{display_sep}"
 			)
+			yield from _automatic_dir_delete_ops(dst_relpath)
 
 		# Rename files
 		if self.rename_threshold is not None:
@@ -953,6 +981,7 @@ class Sync:
 						byte_diff = 0,
 						summary = f"R {rename_from} -> {rename_to}"
 					)
+					yield from _automatic_dir_delete_ops(dst_relpath)
 
 				except KeyError:
 					# dst file not a result of a rename
@@ -970,6 +999,7 @@ class Sync:
 					byte_diff = byte_diff,
 					summary = f"- {dst_relpath_real}"
 				)
+				yield from _automatic_dir_delete_ops(dst_relpath)
 
 		# Send files to trash
 		elif self.trash is not None:
@@ -985,6 +1015,7 @@ class Sync:
 					byte_diff = byte_diff,
 					summary = f"~ {dst_relpath_real}"
 				)
+				yield from _automatic_dir_delete_ops(dst_relpath)
 
 		# Create files
 		for src_relpath in src_only_relpaths:
@@ -1029,14 +1060,15 @@ class Sync:
 		# Create empty directories
 		src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
 		for relpath in src_only_empty_dirs:
-			src_relpath_real = src_real_names[relpath]
-			dst = self.dst / src_relpath_real
-			yield CreateDirOperation(
-				src = None,
-				dst = dst,
-				byte_diff = 0,
-				summary = f"+ {src_relpath_real}{display_sep}"
-			)
+			if relpath not in dst_dirs:
+				src_relpath_real = src_real_names[relpath]
+				dst = self.dst / src_relpath_real
+				yield CreateDirOperation(
+					src = None,
+					dst = dst,
+					byte_diff = 0,
+					summary = f"+ {src_relpath_real}{display_sep}"
+				)
 
 	def run(self) -> Results:
 		if self._state != Sync._SyncState.READY:
@@ -1189,29 +1221,6 @@ def _relative_to(path:PathType, root:PathType) -> PathType:
 		return path.relative_to(cast(Path, root))
 	else:
 		return path.relative_to(cast(RemotePath, root))
-
-def _delete_empty_dirs(dir:PathType, dir_stop:PathType) -> Iterator[PathType]:
-	'''Iteratively delete empty directories, starting with `dir` and moving up to (but not including) `dir_stop`.'''
-
-	if not dir.is_dir():
-		raise ValueError(f"Expected a dir: {dir}")
-	if isinstance(dir, Path) and isinstance(dir_stop, Path):
-		if not dir.is_relative_to(dir_stop):
-			raise ValueError(f"Chosen root ({dir_stop}) is not an ancestor of dir ({dir})")
-	elif isinstance(dir, RemotePath) and isinstance(dir_stop, RemotePath):
-		if not dir.is_relative_to(dir_stop):
-			raise ValueError(f"Chosen root ({dir_stop}) is not an ancestor of dir ({dir})")
-	else:
-		raise ValueError(f"'dir' and 'dir_stop' must be the same type.")
-	#if any(dir.iterdir()):
-	#	raise OSError(f"Dir is not empty: {dir}")
-	try:
-		while dir != dir_stop and not any(dir.iterdir()):
-			yield dir # for logging
-			dir.rmdir()
-			dir = dir.parent
-	except OSError as e:
-		raise DirDeleteError(str(e)) from e
 
 def _last_bytes(file_path:Path, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''

@@ -73,4 +73,8 @@ When a nested file is included, e.g., `+ foo/**/bar.txt`, then parent folders ar
 
 `python -m psync src dst -f ./-`
 
-&emsp; ↳ Copies all the `-` file inside `src/` to `dst/`.
+&emsp; ↳ Copies the `-` file inside `src/` to `dst/`.
+
+`python -m psync src dst -f a/ b/c/ ./**/1.txt`
+
+&emsp; ↳ Copies the all `1.txt` files from inside `src/a/` and `src/b/c/` to `dst/`.

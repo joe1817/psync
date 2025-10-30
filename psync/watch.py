@@ -53,8 +53,7 @@ class _LocalWatcher(FileSystemEventHandler):
 			self.sync.filter = PathFilter(is_glob=False).allow(relpath)
 			self.sync.run()
 		else:
-			dir_glob = PathFilter._convert_to_glob_string(relpath, is_glob=False, glob_is_escaped=False)
-			self.sync.filter = PathFilter().allow(relpath+"/", is_glob=False).allow(os.path.join(dir_glob, "**", "*"), is_glob=True)
+			self.sync.filter = PathFilter().allow(relpath, is_glob=False, is_dir=True).allow("./**/*", is_glob=True)
 			self.sync.run()
 
 	def on_deleted(self, event):
@@ -70,8 +69,7 @@ class _LocalWatcher(FileSystemEventHandler):
 				self.sync.run()
 		elif os.path.isdir(dst_path):
 			if self.sync.delete_files or self.sync.trash:
-				dir_glob = PathFilter._convert_to_glob_string(relpath, is_glob=False, glob_is_escaped=False)
-				self.sync.filter = PathFilter().allow(relpath+"/", is_glob=False).allow(os.path.join(dir_glob, "**", "*"), is_glob=True)
+				self.sync.filter = PathFilter().allow(relpath, is_glob=False, is_dir=True).allow("./**/*", is_glob=True)
 				self.sync.run()
 
 	def on_modified(self, event):
@@ -94,15 +92,13 @@ class _LocalWatcher(FileSystemEventHandler):
 			self.sync.run()
 		else:
 			if self.sync.delete_files or self.sync.trash:
-				src_dir_glob = PathFilter._convert_to_glob_string(src_relpath, is_glob=False, glob_is_escaped=False)
-				dst_dir_glob = PathFilter._convert_to_glob_string(dst_relpath, is_glob=False, glob_is_escaped=False)
 				self.sync.filter = PathFilter().allow(
-					src_relpath+"/",
-					dst_relpath+"/",
+					src_relpath,
+					dst_relpath,
 					is_glob=False,
+					is_dir = True,
 				).allow(
-					os.path.join(src_dir_glob, "**", "*"),
-					os.path.join(dst_dir_glob, "**", "*"),
+					"./**/*",
 					is_glob=True,
 				)
 				self.sync.run()

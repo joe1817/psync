@@ -321,7 +321,6 @@ class TestBackup(unittest.TestCase):
 
 		f = PathFilter(r"./a/ ./a/b")
 		self.assertTrue(f.filter("a/"))
-		#self.assertTrue(f.filter("a//")) # TODO
 		self.assertTrue(f.filter("a/b"))
 		self.assertFalse(f.filter("c"))
 
@@ -380,6 +379,32 @@ class TestBackup(unittest.TestCase):
 		if os.sep == "\\":
 			self.assertRaises(ValueError, PathFilter,  "+ \\/a")
 			self.assertRaises(ValueError, PathFilter,  "+ \\\\a")
+
+		f = PathFilter("a/ b/ ./1 c/ c/d/ ./2")
+		self.assertFalse(f.filter("1"))
+		self.assertTrue(f.filter("a/1"))
+		self.assertTrue(f.filter("b/1"))
+		self.assertTrue(f.filter("a/2"))
+		self.assertTrue(f.filter("b/2"))
+		self.assertFalse(f.filter("c/1"))
+		self.assertTrue(f.filter("a/2"))
+		self.assertTrue(f.filter("b/2"))
+		self.assertTrue(f.filter("c/2"))
+		self.assertFalse(f.filter("c/3"))
+		self.assertTrue(f.filter("c/d/2"))
+		self.assertFalse(f.filter("d/2"))
+
+		f = PathFilter("a/ - b/ + c/ d ./1 + e/ ./**/*")
+		self.assertFalse(f.filter("a/1"))
+		self.assertFalse(f.filter("b/1"))
+		self.assertTrue(f.filter("c/1"))
+		self.assertFalse(f.filter("d/1"))
+		self.assertTrue(f.filter("e/e/e/1"))
+
+		f = PathFilter("a/b/ ./1")
+		self.assertFalse(f.filter("a/1"))
+		self.assertFalse(f.filter("b/1"))
+		self.assertTrue(f.filter("a/b/1"))
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

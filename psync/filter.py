@@ -1,11 +1,18 @@
+# Copyright (c) 2025 Joe Walter
+# GNU General Public License v3.0
+
 import os
 import sys
 import re
+from dataclasses import dataclass
+from collections import namedtuple
 
 if sys.version_info >= (3, 13):
 	import glob
 else:
 	import glob2 as glob
+
+from .errors import StateError
 
 class Filter:
 	def filter(self, relpath:str, default:bool|None = None) -> bool:
@@ -14,10 +21,25 @@ class Filter:
 class PathFilter(Filter):
 	'''Object that holds a parsed filter string for quicker file filtering.'''
 
-	patterns : list[tuple[bool, str|re.Pattern]]
+	@dataclass
+	class _Segment:
+		'''The building blocks of a `PathFilter`, built from a pattern string and action. Each file path will be compared to a list of these, and the first one that matches will decide whether the file is allowed or rejected.'''
+
+		glob_pattern : str  # The pattern string is converted to a glob string and stored here
+		action       : bool # Whether to allow (True) or reject (False)
+		matcher      : re.Pattern # Compiled regular expression will do the matching
+		is_relative  : bool # segment pattern originally began with "./"
+		is_implicit  : bool # segment was automatically generated
+
+	if os.sep == "\\":
+		seps = r"\\/" # regex pattern is deliberate
+	else:
+		seps = "/"
 
 	@classmethod
 	def _tokenize(cls, s:str, *, is_glob:bool, glob_is_escaped:bool):
+		'''Yield tokens from a filter string, usually coming from the command line.'''
+
 		escape   :bool = False # used to turn backslash, glob chars, whitespace, quotes into literals; backslash is treated literally for invalid escape sequences
 		s_quotes :bool = False # treat everything within single quotes as literal
 		d_quotes :bool = False # double quotes treat whitespace and single quotes as literal only
@@ -122,62 +144,86 @@ class PathFilter(Filter):
 				token += char
 
 	@classmethod
+	def _parse_pattern(cls, action:bool, pattern:str, *, ignore_hidden:bool, ignore_case:bool, is_glob:bool, glob_is_escaped:bool, is_dir:bool|None):
+		'''Create a new `Segment` from the pattern string.'''
+
+		is_relative = False
+		if pattern[:2] == f".{os.sep}" or pattern[:2] == "./":
+			is_relative = True
+			if glob_is_escaped:
+				# consider anything other than a single backslash next to a glob char to be repeated path separators
+				pattern = re.sub(rf"^([{PathFilter.seps}](?![*?[]))|([{PathFilter.seps}]{{2,}})", "", pattern[2:])
+			else:
+				pattern = pattern[2:].lstrip(PathFilter.seps)
+		if pattern:
+			# don't allow escaped lone - or +
+			# \- and \+ are valid filenames in Linux
+			# and Windows shouldn't have a unique escape sequence if it can be avoided
+			if pattern == r"\-" or pattern == r"\+":
+				raise ValueError(f"Pattern {pattern} is invalid. You probably meant: ./{pattern[1]}")
+			# unescape glob chars
+			glob_pattern = PathFilter._convert_to_glob_string(pattern, is_glob=is_glob, glob_is_escaped=glob_is_escaped)
+			# don't allow . or .. segments
+			if glob_pattern == ".." or re.search(rf"^\.\.?[{PathFilter.seps}]", glob_pattern) or re.search(rf"[{PathFilter.seps}]\.\.?[{PathFilter.seps}]", glob_pattern) or re.search(rf"[{PathFilter.seps}]\.\.?$", glob_pattern):
+				raise ValueError(f". and .. path references are not supported (except for paths starting with ./): {pattern}")
+			# collapse repeated slashes
+			glob_pattern = re.sub(rf"[{PathFilter.seps}]+", "/", glob_pattern)
+			# don't allow absolute paths
+			if os.path.isabs(glob_pattern) or glob_pattern[0] in PathFilter.seps:
+				# just assume anything starting with a path separator is an absolute path
+				raise ValueError(f"Absolute paths are not supported in filter: {pattern}")
+			# handle trailing slash
+			if is_dir is not None:
+				count = len(glob_pattern) - len(glob_pattern.rstrip(PathFilter.seps))
+				if is_dir and count%2 == 0:
+					glob_pattern += "/"
+				elif not is_dir and count%2:
+					glob_pattern = glob_pattern[:-1]
+			# convert to regex
+			regex = glob.translate(glob_pattern, recursive=True, include_hidden=(not ignore_hidden))
+			matcher = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
+			return PathFilter._Segment(glob_pattern=glob_pattern, action=action, matcher=matcher, is_relative=is_relative, is_implicit=False)
+		else:
+			return None
+
+	@classmethod
 	def _convert_to_glob_string(cls, pattern:str, *, is_glob:bool, glob_is_escaped:bool):
+		'''Convert a pattern string, which may or may not include glob characters, into a glob string with appropraite glob characters escaped.'''
+
+		if not is_glob and glob_is_escaped:
+			raise ValueError(f"Incompatible arguments: is_glob==False, glob_is_escaped==True")
 		glob_string = ""
 		escape = False
 		for c in pattern:
 			if c == "\\":
-				escape = True
-			elif c in ["*", "?", "["]:
-				if is_glob:
-					if escape:
-						if glob_is_escaped:
-							glob_string += glob.translate(c)
-						else:
-							glob_string += "\\"
-							glob_string += c
-						escape = False
-					else:
-						glob_string += c
-				else:
+				if glob_is_escaped:
 					if escape:
 						glob_string += "\\"
 						escape = False
+					else:
+						escape = True
+				else:
+					glob_string += "\\"
+			elif is_glob and c in ["*", "?", "["]:
+				if escape:
+					glob_string += glob.translate(c)
+				else:
 					glob_string += c
 			else:
 				if escape:
 					glob_string += "\\"
 					escape = False
 				glob_string += c
+		if escape:
+			glob_string += "\\"
 		return glob_string
-
-	@classmethod
-	def _parse_pattern(cls, action:bool, pattern:str, *, ignore_hidden:bool, ignore_case:bool, is_glob:bool, glob_is_escaped:bool):
-		sep = f"{os.sep}/"
-		if pattern[:2] == f".{os.sep}" or pattern[:2] == "./":
-			pattern = pattern[2:].lstrip(sep)
-		if pattern:
-			# don't allow escaped lone - and +
-			# \- and \+ are valid filenames in Linux
-			# and Windows shouldn't have a unique escape sequence if it can be avoided
-			if pattern == r"\-" or pattern == r"\+":
-				raise ValueError(f"Pattern {pattern} is invalid. You probably meant: ./{pattern[1]}")
-			if pattern == ".." or re.search(rf"^\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.$", pattern):
-				raise ValueError(f"Parent directories ('..') are not supported in filter: {pattern}")
-			glob_pattern = PathFilter._convert_to_glob_string(pattern, is_glob=is_glob, glob_is_escaped=glob_is_escaped)
-			if os.path.isabs(glob_pattern) or glob_pattern[0] in sep:
-				# just assume anything starting with a path separator is an absolute path
-				raise ValueError(f"Absolute paths are not supported in filter: {pattern}")
-			regex = glob.translate(glob_pattern, recursive=True, include_hidden=(not ignore_hidden))
-			matcher = re.compile(regex, flags=re.IGNORECASE if ignore_case else 0)
-			return (action, matcher)
-		else:
-			return None
 
 	def __init__(self, filter_string:str = "", *, ignore_hidden:bool = False, ignore_case:bool = False, is_glob:bool = True, glob_is_escaped:bool = False, default:bool = False):
 		'''
+		Initialize a Filter object.
+
 		Args
-			filter_string      (str) : The filter string that includes/excludes file system entries. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files.
+			filter_string      (str) : The filter string that allows/rejects file system entries. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Allowing (+) or rejecting (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Patterns that start with "./" will be appended to previous directory patterns in the same "allow" group. For example, "+ a/ - b/ + c/ d/ ./1" is equivalent to "+ a/ - b/ + c/ d/ c/1 d/1".
 			ignore_hidden     (bool) : Whether to ignore hidden files by default in glob patterns. If `True`, then wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., "**/.*") will still match these file system entries. (Defaults to `False`.)
 			ignore_case       (bool) : Whether to ignore case when comparing files to the filter string. (Defaults to `False`.)
 			is_glob           (bool) : Whether the filter string is a glob string. (Defaults to `True`.)
@@ -190,8 +236,10 @@ class PathFilter(Filter):
 		self.glob_is_escaped = glob_is_escaped
 		self.default         = default
 
-		self.implicit_dirs: set[str] = set()
-		self.filters : list[tuple[bool, re.Pattern]] = []
+		self._segments : list[PathFilter._Segment] = []
+		self._tmp_allowed : set[str] = set() # directories implied when allowing an entry with multiple path segments
+		self._str = ""
+		self._str_is_allowing = True
 
 		if filter_string:
 			action = True
@@ -200,66 +248,124 @@ class PathFilter(Filter):
 					action = True
 				elif token == False:
 					action = False
-					# self.implicit_dirs = set()
 				elif action:
 					self.allow(token)
 				else:
 					self.reject(token)
 
-	def allow(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "PathFilter":
+	def allow(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None, is_dir:bool|None = None) -> "PathFilter":
+		'''Add an allow segment to the `Filter`.'''
+
 		for pattern in patterns:
-			filter = PathFilter._parse_pattern(True, pattern,
+			for segment in self._get_segments(True, pattern,
 				ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
 				ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
 				is_glob = is_glob if is_glob is not None else self.is_glob,
 				glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
-			)
-			if filter:
-				self.filters.append(filter)
-
-				pattern = pattern.rstrip("/").rstrip(os.sep)
-				while True:
-					pattern = os.path.dirname(pattern)
-					if pattern == "" or pattern == os.sep or pattern == "/":
-						break
-					if pattern in self.implicit_dirs:
-						break
-					self.implicit_dirs.add(pattern)
-					filter = PathFilter._parse_pattern(True, pattern + "/",
-						ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
-						ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
-						is_glob = is_glob if is_glob is not None else self.is_glob,
-						glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
-					)
-					if filter:
-						self.filters.append(filter)
-					else:
-						break
+				is_dir = is_dir,
+			):
+				self._tmp_allowed.add(segment.glob_pattern)
+				self._segments.append(segment)
+				# add pattern to repr
+				if self._str:
+					self._str += " "
+				if self._str_is_allowing:
+					self._str += segment.glob_pattern
+				else:
+					self._str += f"+ {segment.glob_pattern}"
+					self._str_is_allowing = True
 		return self
 
-	def reject(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "PathFilter":
+	def reject(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None, is_dir:bool|None = None) -> "PathFilter":
+		'''Add a rejection segment to the `Filter`.'''
+
+		self._tmp_allowed = set()
 		for pattern in patterns:
-			filter = PathFilter._parse_pattern(False, pattern,
+			for segment in self._get_segments(False, pattern,
 				ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
 				ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
 				is_glob = is_glob if is_glob is not None else self.is_glob,
 				glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
-			)
-			if filter:
-				self.filters.append(filter)
-				self.implicit_dirs = set()
+				is_dir = is_dir,
+			):
+				self._segments.append(segment)
+				# add pattern to repr
+				if self._str:
+					self._str += " "
+				if self._str_is_allowing:
+					self._str += f"- {segment.glob_pattern}"
+					self._str_is_allowing = False
+				else:
+					self._str += segment.glob_pattern
 		return self
+
+	def _get_segments(self, action:bool, pattern:str, *, ignore_hidden:bool, ignore_case:bool, is_glob:bool, glob_is_escaped:bool, is_dir:bool|None):
+		'''Get all segments from this pattern, including implicit ones.'''
+
+		segment = PathFilter._parse_pattern(action, pattern, ignore_hidden=ignore_hidden, ignore_case=ignore_case, is_glob=is_glob, glob_is_escaped=glob_is_escaped, is_dir=is_dir)
+		if segment:
+			if segment.is_relative and not segment.action:
+				raise ValueError("Relative patterns can only be used with a + action")
+
+			if not segment.is_relative:
+				yield segment
+
+				# Include implicit parent directories.
+				if segment.action:
+					pattern = pattern.rstrip("/").rstrip(os.sep)
+					while True:
+						pattern = os.path.dirname(pattern)
+						if pattern == "" or pattern == os.sep or pattern == "/":
+							break
+						segment = PathFilter._parse_pattern(True, pattern,
+							ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
+							ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
+							is_glob = is_glob if is_glob is not None else self.is_glob,
+							glob_is_escaped = glob_is_escaped if glob_is_escaped is not None else self.glob_is_escaped,
+							is_dir = True,
+						)
+						assert segment.glob_pattern.endswith("/") or segment.glob_pattern.endswith("\\")
+						if segment.glob_pattern in self._tmp_allowed:
+							break
+						if segment:
+							assert not segment.is_relative
+							segment.is_implicit = True
+							yield segment
+						else:
+							break
+			else:
+				# Combine relative segment with parent dirs.
+				# If there are no parent dirs then assume relative to root dir. Don't throw away the segment.
+				segment_handled = False
+				for parent in reversed(self._segments):
+					if not parent.action:
+						break
+					if not parent.is_implicit and parent.glob_pattern.endswith("/"):
+						segment_handled = True
+						pattern = parent.glob_pattern + segment.glob_pattern
+						for new_segment in self._get_segments(True, pattern,
+							ignore_hidden = ignore_hidden,
+							ignore_case = ignore_case,
+							is_glob = True,
+							glob_is_escaped = False,
+							is_dir = is_dir,
+						):
+							new_segment.is_implicit = True
+							yield new_segment
+				if not segment_handled:
+					segment.is_implicit = True
+					yield segment
 
 	def filter(self, relpath:str, default:bool|None = None) -> bool:
 		'''Compare the file path against the filter string.'''
 
-		for action, matcher in self.filters:
-			if matcher.match(relpath):
-				return action
+		for segment in self._segments:
+			if segment.matcher.match(relpath):
+				return segment.action
 		return default if default is not None else self.default
 
 	def __str__(self):
-		val = ""
-		for action, pattern in self.filters:
-			val += (" " if val else "") + ("ALLOW " if action else "REJECT ") + pattern.pattern
-		return val
+		return self._str if self._str else "**"
+
+	def __repr__(self):
+		return "PathFilter('" + str(self).replace("'", "\\'") + "')"

@@ -1078,7 +1078,7 @@ class Sync:
 			HEADER = _RecordTag.HEADER.dict()
 			FOOTER = _RecordTag.FOOTER.dict()
 
-			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=!s}, {self.trash=}, {self.delete_files=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
+			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
 			self.logger.debug("")
 
 			width = max(len(str(self.src)), len(str(self.dst)), 7) + 3

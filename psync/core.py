@@ -281,6 +281,8 @@ class Sync:
 		self._log_file         : PathType|None = None
 		self._log_level        : int = logging.DEBUG
 
+		self._tmp_log_file     : PathType|None = None
+
 		# This isn't a problem because dirs are walked in their entirety before operations are performed
 		# If this changes in the furture, should also check that src or dst isn't nested in the other
 		#if src.resolve() == dst.resolve():
@@ -587,37 +589,45 @@ class Sync:
 		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
 			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
 
-		# TODO accept RemotePath
-		if val is not None and not isinstance(val, str|os.PathLike):
+		if val is None:
+			self.close_file_handler()
+			self._log_file = None
+			self._tmp_log_file = None
+			self.handler_file = None
+			return
+
+		if not isinstance(val, str|os.PathLike):
 			raise TypeError(f"Bad type for property 'log_file' (expected {str|os.PathLike}): {val}")
 
-		log_file = val
-		if log_file is None:
-			pass
-		elif log_file == "auto":
-			log_file = Path.home() / f"{self.logger.name}.log"
+		log_file: PathType
+		tmp_log_file: PathType
+		if isinstance(val, Path):
+			log_file     = val
+			tmp_log_file = val
+		elif isinstance(val, RemotePath):
+			raise NotImplementedError()
 		else:
-			log_file = Path(log_file)
-
-		if log_file is None:
-			tmp_log_file = None
-			handler_file = None
-		else:
-			if log_file.exists():
-				if not log_file.is_file():
-					raise ValueError(f"'log' is not a file: {log_file}")
-				tmp_log_file = log_file
-			else:
+			if val == "auto":
+				log_file = Path.home() / f"{self.logger.name}.log"
 				with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as tmp_log:
 					tmp_log_file = Path(tmp_log.name)
-			#formatter = logging.Formatter("%(levelname)s: %(message)s")
-			handler_file = logging.FileHandler(tmp_log_file, encoding="utf-8")
-			handler_file.setFormatter(_LogFileFormatter())
-			handler_file.addFilter(_NonEmptyFilter())
-			if self.handler_file:
-				self._log_level = self.handler_file.level
-			handler_file.setLevel(self._log_level)
-			self.logger.addHandler(handler_file)
+			else:
+				log_file = Path(val)
+				tmp_log_file = log_file
+
+		assert isinstance(log_file, PathType)
+		assert isinstance(tmp_log_file, PathType)
+		if log_file.exists():
+			if not log_file.is_file():
+				raise ValueError(f"'log' is not a file: {log_file}")
+
+		handler_file = logging.FileHandler(tmp_log_file, encoding="utf-8")
+		handler_file.setFormatter(_LogFileFormatter())
+		handler_file.addFilter(_NonEmptyFilter())
+		if self.handler_file:
+			self._log_level = self.handler_file.level
+		handler_file.setLevel(self._log_level)
+		self.logger.addHandler(handler_file)
 
 		self.close_file_handler()
 
@@ -686,7 +696,7 @@ class Sync:
 			self.handler_file.close()
 			assert self._tmp_log_file
 			assert self.log_file
-			self._tmp_log_file.replace(self.log_file)
+			_replace(self._tmp_log_file, self.log_file)
 
 	def _walk(self, top:PathType) -> Iterator[tuple[PathType, list[os.DirEntry|RemotePath], list[os.DirEntry|RemotePath]]]:
 		stack        : list[Any] = [top]
@@ -1071,6 +1081,8 @@ class Sync:
 				)
 
 	def run(self) -> Results:
+		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''
+
 		if self._state != Sync._SyncState.READY:
 			raise StateError("Sync object state is not READY.")
 

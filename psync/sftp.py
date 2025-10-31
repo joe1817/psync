@@ -3,11 +3,10 @@
 
 import os
 import sys
-import posixpath
 import stat
-import socket
 import tempfile
-import logging
+import posixpath
+import socket
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 from typing import Iterator, Union
@@ -22,9 +21,8 @@ try:
 except ImportError:
 	pass
 
-logger = logging.getLogger("psync")
+from .errors import MetadataUpdateError
 
-# TODO use/extend PurePosixPath
 class RemotePath:
 	'''A class that mimics a Path object while operating on a remote SFTP server using a paramiko SFTPClient object.'''
 
@@ -164,7 +162,7 @@ class RemotePath:
 		if st.st_atime is not None and st.st_mtime is not None:
 			os.utime(dst, (st.st_atime, st.st_mtime))
 		else:
-			logger.warning(f"Could not update time metadata: {src}")
+			raise MetadataUpdateError(f"Could not update time metadata: {src}")
 
 	@classmethod
 	def _put_file(cls, src:Path, dst:"RemotePath", *, follow_symlinks:bool = False):
@@ -183,7 +181,7 @@ class RemotePath:
 		if st.st_atime is not None and st.st_mtime is not None:
 			connection.utime(str(dst), (st.st_atime, st.st_mtime))
 		else:
-			logger.warning(f"Could not update time metadata: {src}")
+			raise MetadataUpdateError(f"Could not update time metadata: {src}")
 
 	connection:paramiko.sftp_client.SFTPClient
 

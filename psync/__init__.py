@@ -1,14 +1,27 @@
 # Copyright (c) 2025 Joe Walter
 # GNU General Public License v3.0
 
-from .core import sync
-from .filter import Filter
-from .data import Results
+from .core import Sync, Results, Operation, CreateFileOperation, UpdateFileOperation, RenameFileOperation, DeleteFileOperation, TrashFileOperation, CreateDirOperation, DeleteDirOperation
+from .filter import Filter, PathFilter
 from .sftp import RemotePath
+from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
 
 __all__ = [
-    "sync",
-	"Filter",
+    "Sync",
     "Results",
-	"RemotePath"
+	"Operation",
+	"CreateFileOperation",
+	"UpdateFileOperation",
+	"RenameFileOperation",
+	"DeleteFileOperation",
+	"TrashFileOperation",
+	"CreateDirOperation",
+	"DeleteDirOperation",
+	"Filter",
+	"PathFilter",
+	"RemotePath",
+	"MetadataUpdateError",
+	"DirDeleteError",
+	"StateError",
+	"ImmutableObjectError",
 ]

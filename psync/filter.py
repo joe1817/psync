@@ -8,6 +8,10 @@ else:
 	import glob2 as glob
 
 class Filter:
+	def filter(self, relpath:str, default:bool|None = None) -> bool:
+		raise NotImplementedError()
+
+class PathFilter(Filter):
 	'''Object that holds a parsed filter string for quicker file filtering.'''
 
 	patterns : list[tuple[bool, str|re.Pattern]]
@@ -160,7 +164,7 @@ class Filter:
 				raise ValueError(f"Pattern {pattern} is invalid. You probably meant: ./{pattern[1]}")
 			if pattern == ".." or re.search(rf"^\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.[{sep}]", pattern) or re.search(rf"[{sep}]\.\.$", pattern):
 				raise ValueError(f"Parent directories ('..') are not supported in filter: {pattern}")
-			glob_pattern = Filter._convert_to_glob_string(pattern, is_glob=is_glob, glob_is_escaped=glob_is_escaped)
+			glob_pattern = PathFilter._convert_to_glob_string(pattern, is_glob=is_glob, glob_is_escaped=glob_is_escaped)
 			if os.path.isabs(glob_pattern) or glob_pattern[0] in sep:
 				# just assume anything starting with a path separator is an absolute path
 				raise ValueError(f"Absolute paths are not supported in filter: {pattern}")
@@ -204,7 +208,7 @@ class Filter:
 
 	def allow(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "PathFilter":
 		for pattern in patterns:
-			filter = Filter._parse_pattern(True, pattern,
+			filter = PathFilter._parse_pattern(True, pattern,
 				ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
 				ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
 				is_glob = is_glob if is_glob is not None else self.is_glob,
@@ -221,7 +225,7 @@ class Filter:
 					if pattern in self.implicit_dirs:
 						break
 					self.implicit_dirs.add(pattern)
-					filter = Filter._parse_pattern(True, pattern + "/",
+					filter = PathFilter._parse_pattern(True, pattern + "/",
 						ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
 						ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
 						is_glob = is_glob if is_glob is not None else self.is_glob,
@@ -233,9 +237,9 @@ class Filter:
 						break
 		return self
 
-	def reject(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "Filter":
+	def reject(self, *patterns, ignore_hidden:bool|None = None, ignore_case:bool|None = None, is_glob:bool|None = None, glob_is_escaped:bool|None = None) -> "PathFilter":
 		for pattern in patterns:
-			filter = Filter._parse_pattern(False, pattern,
+			filter = PathFilter._parse_pattern(False, pattern,
 				ignore_hidden = ignore_hidden if ignore_hidden is not None else self.ignore_hidden,
 				ignore_case = ignore_case if ignore_case is not None else self.ignore_case,
 				is_glob = is_glob if is_glob is not None else self.is_glob,
@@ -253,3 +257,9 @@ class Filter:
 			if matcher.match(relpath):
 				return action
 		return default if default is not None else self.default
+
+	def __str__(self):
+		val = ""
+		for action, pattern in self.filters:
+			val += (" " if val else "") + ("ALLOW " if action else "REJECT ") + pattern.pattern
+		return val

@@ -13,9 +13,9 @@ import unittest
 import doctest
 from pathlib import Path
 
-from . import core, data, helpers, sftp
+from . import core, filter, helpers, sftp
 from . import __main__ as main
-from .filter import Filter
+from .filter import PathFilter
 
 logger = logging.getLogger("psync")
 
@@ -105,7 +105,7 @@ def create_file_structure(root_dir:Path, structure:dict, *, _symlinks:dict|None 
 
 def load_tests(loader, tests, ignore):
 	tests.addTests(doctest.DocTestSuite(core))
-	tests.addTests(doctest.DocTestSuite(data))
+	tests.addTests(doctest.DocTestSuite(filter))
 	tests.addTests(doctest.DocTestSuite(helpers))
 	tests.addTests(doctest.DocTestSuite(sftp))
 	return tests
@@ -116,12 +116,96 @@ class TestBackup(unittest.TestCase):
 
 	def test_argparse(self):
 		parsed = main._ArgParser.parse(["src", "dst", "-f", "+ \"a b.txt\""])
-		self.assertTrue(parsed.filter[0] == "+ \"a b.txt\"")
+		self.assertTrue(parsed.filter.filter("a b.txt"))
+		self.assertFalse(parsed.filter.filter("b.txt"))
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_init(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			sync = core.Sync(root, root)
+
+			sync.filter = "- a b + c d - **"
+
+			sync.trash = root
+			sync.delete_files = False
+
+			self.assertEqual(sync.trash, root)
+			self.assertEqual(sync.delete_files, False)
+
+			with self.assertRaises(RuntimeError):
+				sync.delete_files = True
+
+			sync.trash = None
+			sync.delete_files = True
+
+			self.assertEqual(sync.trash, None)
+			self.assertEqual(sync.delete_files, True)
+
+			with self.assertRaises(RuntimeError):
+				sync.trash = root
+
+			sync.force_update = True
+			self.assertEqual(sync.force_update, True)
+			sync.force_update = False
+			self.assertEqual(sync.force_update, False)
+
+			sync.metadata_only = True
+			self.assertEqual(sync.metadata_only, True)
+			sync.metadata_only = False
+			self.assertEqual(sync.metadata_only, False)
+
+			sync.rename_threshold = 100
+			self.assertEqual(sync.rename_threshold, 100)
+			sync.rename_threshold = 0
+			self.assertEqual(sync.rename_threshold, 0)
+			sync.rename_threshold = None
+			self.assertEqual(sync.rename_threshold, None)
+
+			sync.ignore_symlinks = True
+			sync.follow_symlinks = False
+
+			self.assertEqual(sync.ignore_symlinks, True)
+			self.assertEqual(sync.follow_symlinks, False)
+
+			with self.assertRaises(RuntimeError):
+				sync.follow_symlinks = True
+
+			sync.ignore_symlinks = False
+			sync.follow_symlinks = True
+
+			self.assertEqual(sync.ignore_symlinks, False)
+			self.assertEqual(sync.follow_symlinks, True)
+
+			with self.assertRaises(RuntimeError):
+				sync.ignore_symlinks = True
+
+			sync.dry_run = True
+			self.assertEqual(sync.dry_run, True)
+			sync.dry_run = False
+			self.assertEqual(sync.dry_run, False)
+
+			sync.log_file = root / "tmp.log"
+
+			self.assertEqual(sync.log_file, root / "tmp.log")
+
+			sync.log_level = logging.ERROR
+			sync.print_level = logging.ERROR
+
+			self.assertEqual(sync.print_level, logging.ERROR)
+			self.assertEqual(sync.log_level, logging.ERROR)
+
+			sync.log_file = None
+			self.assertEqual(sync.log_file, None)
+
+			sync.log_level = logging.INFO
+			self.assertEqual(sync.log_level, logging.INFO)
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_filter(self):
-		f = Filter(r"+ **")
+		f = PathFilter(r"+ **")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -132,7 +216,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = Filter(r"+ **/*")
+		f = PathFilter(r"+ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -143,7 +227,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a/__pycache__/"))
 		self.assertTrue(f.filter("a/b/__pycache__/"))
 
-		f = Filter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
+		f = PathFilter(r"- **/.*/ **/__pycache__/ + **/*/ **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("a/b"))
 		self.assertTrue(f.filter("a/b/c"))
@@ -154,7 +238,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("a/__pycache__/"))
 		self.assertFalse(f.filter("a/b/__pycache__/"))
 
-		f = Filter(r"+ audio/music/**/*.flac - **/*/ **/*")
+		f = PathFilter(r"+ audio/music/**/*.flac - **/*/ **/*")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -164,7 +248,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("audio/audiobooks/"))
 		self.assertFalse(f.filter("audio/music/OST/Star Wars/cover.jpg"))
 
-		f = Filter(r"- audio/music/**/*.wav + audio/music/**")
+		f = PathFilter(r"- audio/music/**/*.wav + audio/music/**")
 		self.assertTrue(f.filter("audio/"))
 		self.assertTrue(f.filter("audio/music/"))
 		self.assertTrue(f.filter("audio/music/OST/"))
@@ -174,7 +258,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("video/"))
 		self.assertFalse(f.filter("audio/audiobooks/"))
 
-		f = Filter(r"places.sqlite key4.db logins.json cookies.sqlite prefs.js")
+		f = PathFilter(r"places.sqlite key4.db logins.json cookies.sqlite prefs.js")
 		self.assertTrue(f.filter("places.sqlite"))
 		self.assertTrue(f.filter("key4.db"))
 		self.assertTrue(f.filter("logins.json"))
@@ -183,7 +267,7 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("storage.sqlite"))
 		self.assertFalse(f.filter("storage/"))
 
-		f = Filter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
+		f = PathFilter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
 		self.assertTrue(f.filter("**/a b"))
 		self.assertFalse(f.filter("a b"))
 		self.assertFalse(f.filter("1/2/a b"))
@@ -194,13 +278,13 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("Joe's File"))
 		self.assertFalse(f.filter("a"))
 
-		f = Filter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
+		f = PathFilter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
 		self.assertTrue(f.filter("'a'"))
 		self.assertTrue(f.filter("\"b\""))
 		self.assertTrue(f.filter("x 1y ?"))
 		self.assertFalse(f.filter("x 1y 2"))
 
-		f = Filter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
+		f = PathFilter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("b/a"))
 		self.assertTrue(f.filter("b/a/a"))
@@ -212,7 +296,7 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("b/b/y"))
 		self.assertFalse(f.filter("aa/y"))
 
-		f = Filter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
+		f = PathFilter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
 		self.assertTrue(f.filter("a"))
 		self.assertTrue(f.filter("A"))
 		self.assertTrue(f.filter("b"))
@@ -224,12 +308,13 @@ class TestBackup(unittest.TestCase):
 		self.assertFalse(f.filter("d/.a"))
 		self.assertFalse(f.filter("d/.A"))
 
-		f = Filter(r"./a/ ./a/b")
+		f = PathFilter(r"./a/ ./a/b")
 		self.assertTrue(f.filter("a/"))
+		#self.assertTrue(f.filter("a//")) # TODO
 		self.assertTrue(f.filter("a/b"))
 		self.assertFalse(f.filter("c"))
 
-		f = Filter(r"a/ a/b")
+		f = PathFilter(r"a/ a/b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter("a/"))
 			self.assertTrue(f.filter("a\\"))
@@ -243,7 +328,7 @@ class TestBackup(unittest.TestCase):
 			self.assertFalse(f.filter("a\\b"))
 			self.assertFalse(f.filter("c"))
 
-		f = Filter(r"a\\ a\b")
+		f = PathFilter(r"a\\ a\b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter("a/"))
 			self.assertTrue(f.filter("a\\"))
@@ -257,7 +342,7 @@ class TestBackup(unittest.TestCase):
 			self.assertTrue(f.filter("a\\b"))
 			self.assertFalse(f.filter("c"))
 
-		f = Filter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
+		f = PathFilter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
 		self.assertTrue(f.filter("- a"))
 		self.assertTrue(f.filter("-a"))
 		self.assertTrue(f.filter("--"))
@@ -268,28 +353,29 @@ class TestBackup(unittest.TestCase):
 		self.assertTrue(f.filter("a'b"))
 		self.assertFalse(f.filter("b"))
 
-		f = Filter(r"'-'")
+		f = PathFilter(r"'-'")
 		self.assertTrue(f.filter("-"))
 		self.assertFalse(f.filter("a"))
 
-		f = Filter("\"-\"")
+		f = PathFilter("\"-\"")
 		self.assertTrue(f.filter("-"))
 		self.assertFalse(f.filter("a"))
 
-		self.assertRaises(ValueError, Filter, r"+ \-")
-		self.assertRaises(ValueError, Filter, r"+ 'a")
-		self.assertRaises(ValueError, Filter,  "+ a\\")
-		self.assertRaises(ValueError, Filter,  "+ /a")
+		self.assertRaises(ValueError, PathFilter, r"+ \-")
+		self.assertRaises(ValueError, PathFilter, r"+ 'a")
+		self.assertRaises(ValueError, PathFilter,  "+ a\\")
+		self.assertRaises(ValueError, PathFilter,  "+ /a")
 
 		if os.sep == "\\":
-			self.assertRaises(ValueError, Filter,  "+ \\/a")
-			self.assertRaises(ValueError, Filter,  "+ \\\\a")
+			self.assertRaises(ValueError, PathFilter,  "+ \\/a")
+			self.assertRaises(ValueError, PathFilter,  "+ \\\\a")
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 	def test_scandir(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
+			sync = core.Sync(root, root) # src, dst need to exist, otherwise don't matter
 			file_structure = {
 				"a": {
 					"aa": {
@@ -353,10 +439,8 @@ class TestBackup(unittest.TestCase):
 			}
 			create_file_structure(root, file_structure)
 
-			files = core._scandir(
-				root = root,
-				filter = "- b/ c/ + **/*/ **/1.???"
-			)
+			sync.filter = "- b/ c/ + **/*/ **/1.???"
+			files = sync._scandir(root = root)
 			files_expected = [
 				"a/aa/1.txt",
 				"a/aa/aaa/1.txt",
@@ -372,10 +456,8 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = core._scandir(
-				root = root,
-				filter = "+ a/a?/a?b/*",
-			)
+			sync.filter = "+ a/a?/a?b/*"
+			files = sync._scandir(root = root)
 			files_expected = [
 				"a/aa/aab/12.txt",
 				"a/ab/abb/12.jpg",
@@ -408,12 +490,10 @@ class TestBackup(unittest.TestCase):
 			}
 			create_file_structure(root, file_structure)
 
-			files = core._scandir(
-				root = root / "d",
-				filter = "+ **/*/ **/*",
-				ignore_symlinks = False,
-				follow_symlinks = False,
-			)
+			sync.filter = "+ **"
+			sync.ignore_symlinks = False
+			sync.follow_symlinks = False
+			files = sync._scandir(root = root / "d")
 			files_expected = [
 				"1.txt",
 				"2.txt",
@@ -428,11 +508,10 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = core._scandir(
-				root = root / "d",
-				filter = "+ **/*/ **/*",
-				follow_symlinks = True,
-			)
+			sync.filter = "+ **"
+			sync.ignore_symlinks = False
+			sync.follow_symlinks = True
+			files = sync._scandir(root = root / "d")
 			files_expected = [
 				"1.txt",
 				"2.txt",
@@ -449,15 +528,14 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = core._scandir(
-				root = root / "g",
-				filter = "+ **/*/ **/*",
-				follow_symlinks = True,
-			)
+			sync.filter = "+ **"
+			sync.ignore_symlinks = False
+			sync.follow_symlinks = True
+			files = sync._scandir(root = root / "g")
 			files_expected = [
 				"1.txt",
 			]
-			with TempLoggingLevel(logger, logging.ERROR):
+			with TempLoggingLevel(sync.logger, logging.ERROR):
 				self.assertEqual(
 					sorted(f.normpath for f in files),
 					sorted(f.replace("/", os.sep) for f in files_expected)
@@ -465,11 +543,10 @@ class TestBackup(unittest.TestCase):
 
 			################################################################################
 
-			files = core._scandir(
-				root = root / "d",
-				filter = "+ **/*/ **/*",
-				ignore_symlinks = True,
-			)
+			sync.filter = "+ **"
+			sync.follow_symlinks = False
+			sync.ignore_symlinks = True
+			files = sync._scandir(root = root / "d")
 			files_expected = [
 				"1.txt",
 			]
@@ -508,23 +585,17 @@ class TestBackup(unittest.TestCase):
 
 			a_root = root / "a"
 			b_root = root / "b"
-			a_files = core._scandir(
-				root = a_root
-			)
-			b_files = core._scandir(
-				root = b_root
-			)
 
-			actual = list(op.summary for op in core._operations(
-				src_root         = a_root,
-				dst_root         = b_root,
-				src_files        = a_files,
-				dst_files        = b_files,
-				trash_root       = Path("/"),
-				delete_files     = False,
-				force_update     = False,
-				metadata_only    = True,
-				rename_threshold = 0,
+			sync = core.Sync(a_root, b_root)
+			sync.trash            = Path("/")
+			sync.delete_files     = False
+			sync.force_update     = False
+			sync.metadata_only    = True
+			sync.rename_threshold = 0
+
+			actual = list(op.summary for op in sync._operations(
+				src_files = sync._scandir(root = a_root),
+				dst_files = sync._scandir(root = b_root),
 			))
 
 			if "nt" in os.name:
@@ -543,22 +614,17 @@ class TestBackup(unittest.TestCase):
 
 			a_root = root / "a"
 			c_root = root / "c"
-			a_files = core._scandir(
-				root = a_root
-			)
-			c_files = core._scandir(
-				root = c_root
-			)
-			actual = list(op.summary for op in core._operations(
-				src_root         = a_root,
-				dst_root         = c_root,
-				src_files        = a_files,
-				dst_files        = c_files,
-				trash_root       = Path("/"),
-				delete_files     = False,
-				force_update     = False,
-				metadata_only    = True,
-				rename_threshold = 1000,
+
+			sync = core.Sync(a_root, c_root)
+			sync.trash            = Path("/")
+			sync.delete_files     = False
+			sync.force_update     = False
+			sync.metadata_only    = True
+			sync.rename_threshold = 1000
+
+			actual = list(op.summary for op in sync._operations(
+				src_files = sync._scandir(root = a_root),
+				dst_files = sync._scandir(root = c_root),
 			))
 			expected = [
 				f"~ {os.path.join('aa', '1.txt')}",
@@ -646,31 +712,33 @@ class TestBackup(unittest.TestCase):
 
 			# test dry_run
 			self.assertFalse(hash_src_old == hash_dst_old)
-			results = core.sync(
+			results = core.Sync(
 				src,
 				dst,
 				trash = "auto",
-				quiet = True,
 				dry_run = True,
-			)
+				print_level = 100,
+			).run()
+
 			self.assertEqual(hash_directory(dst), hash_dst_old)
 
 			################################################################################
 
 			# test basic backup
-			results = core.sync(
+			results = core.Sync(
 				src,
 				dst,
 				trash = "auto",
-				quiet = True
-			)
+				print_level = 100,
+			).run()
+
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertFalse(hash_directory(dst) == hash_dst_old)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			if "nt" in os.name:
-				self.assertEqual(hash_directory(results.trash_root), hash_directory(root / "windows_expected_trash"))
+				self.assertEqual(hash_directory(results.sync.trash), hash_directory(root / "windows_expected_trash"))
 			else:
-				self.assertEqual(hash_directory(results.trash_root), hash_directory(root / "linux_expected_trash"))
+				self.assertEqual(hash_directory(results.sync.trash), hash_directory(root / "linux_expected_trash"))
 
 			################################################################################
 
@@ -683,14 +751,16 @@ class TestBackup(unittest.TestCase):
 			src2 = root / "src2"
 			dst2 = root / "dst2"
 			hash_dst2_old = hash_directory(dst2)
-			results = core.sync(
+			results = core.Sync(
 				src2,
 				dst2,
-				quiet = True,
-			)
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertFalse(hash_directory(dst2) == hash_dst2_old)
 			self.assertEqual(hash_directory(src2), hash_directory(dst2))
-			self.assertEqual(results.create_success, 4)
+			self.assertEqual(results[core.CreateFileOperation][0], 4)
 		assert not root.exists()
 
 		################################################################################
@@ -741,12 +811,14 @@ class TestBackup(unittest.TestCase):
 			create_file_structure(root, file_structure)
 			src = root / "src"
 			dst = root / "dst"
-			results = core.sync(
+			results = core.Sync(
 				src,
 				dst,
 				trash = "auto",
-				quiet = True,
-			)
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 
 if __name__ == "__main__":

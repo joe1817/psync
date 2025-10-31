@@ -1,3 +1,4 @@
+import sys
 import logging
 
 class _DebugInfoFilter(logging.Filter):
@@ -6,9 +7,9 @@ class _DebugInfoFilter(logging.Filter):
 		return logging.DEBUG <= record.levelno <= logging.INFO
 
 class _NonEmptyFilter(logging.Filter):
-    '''Logging filter that only allows non-empty messages.'''
-    def filter(self, record):
-        return bool(str(record.msg).strip())
+	'''Logging filter that only allows non-empty messages.'''
+	def filter(self, record):
+		return bool(str(record.msg).strip())
 
 class _LogFileFormatter(logging.Formatter):
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -31,3 +32,13 @@ class _LogFileFormatter(logging.Formatter):
 			record.msg = f"\n*** {original_message} ***\n"
 		formatted_message = super().format(record)
 		return formatted_message
+
+logger = logging.getLogger("psync")
+logger.setLevel(logging.INFO)
+handler_stdout = logging.StreamHandler(sys.stdout)
+handler_stderr = logging.StreamHandler(sys.stderr)
+handler_stdout.addFilter(_DebugInfoFilter())
+handler_stdout.setLevel(logging.DEBUG)
+handler_stderr.setLevel(logging.WARNING)
+logger.addHandler(handler_stdout)
+logger.addHandler(handler_stderr)

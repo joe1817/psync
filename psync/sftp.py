@@ -3,11 +3,10 @@
 
 import os
 import sys
-import posixpath
 import stat
-import socket
 import tempfile
-import logging
+import posixpath
+import socket
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 from typing import Iterator, Union
@@ -22,9 +21,8 @@ try:
 except ImportError:
 	pass
 
-logger = logging.getLogger("psync")
+from .errors import MetadataUpdateError
 
-# TODO use/extend PurePosixPath
 class RemotePath:
 	'''A class that mimics a Path object while operating on a remote SFTP server using a paramiko SFTPClient object.'''
 
@@ -98,24 +96,24 @@ class RemotePath:
 		return RemotePath(path, parsed.netloc)
 
 	@classmethod
-	def close_connections(cls):
+	def close_connections(cls) -> None:
 		'''Close all SSH and SFTP connections.'''
 
-		for ftp in cls.sftp_connections:
+		for ftp in cls.sftp_connections.values():
 			try:
 				ftp.close()
 			except:
 				pass
-		for ssh in cls.ssh_connections:
+		for ssh in cls.ssh_connections.values():
 			try:
 				ssh.close()
 			except:
 				pass
-		cls.sftp_connections = []
-		cls.ssh_connections = []
+		cls.sftp_connections = {}
+		cls.ssh_connections = {}
 
 	@classmethod
-	def copy_file(cls, src, dst, *, follow_symlinks:bool = False):
+	def copy_file(cls, src, dst, *, follow_symlinks:bool) -> None:
 		'''Copy a file where at least one of `src` and `dst` is a `RemotePath` object.'''
 
 		if isinstance(src, RemotePath) and isinstance(dst, RemotePath):
@@ -136,7 +134,7 @@ class RemotePath:
 			raise ValueError("At least one path must be a RemotePath")
 
 	@classmethod
-	def _get_file(cls, src:"RemotePath", dst:Path, *, follow_symlinks:bool = False):
+	def _get_file(cls, src:"RemotePath", dst:Path, *, follow_symlinks:bool) -> None:
 		'''Download `src` file to `src`.'''
 
 		connection = RemotePath.sftp_connections[src.conn_details]
@@ -164,10 +162,10 @@ class RemotePath:
 		if st.st_atime is not None and st.st_mtime is not None:
 			os.utime(dst, (st.st_atime, st.st_mtime))
 		else:
-			logger.warning(f"Could not update time metadata: {src}")
+			raise MetadataUpdateError(f"Could not update time metadata: {src}")
 
 	@classmethod
-	def _put_file(cls, src:Path, dst:"RemotePath", *, follow_symlinks:bool = False):
+	def _put_file(cls, src:Path, dst:"RemotePath", *, follow_symlinks:bool) -> None:
 		'''Upload `src` file to `dst`.'''
 
 		connection = RemotePath.sftp_connections[dst.conn_details]
@@ -183,7 +181,7 @@ class RemotePath:
 		if st.st_atime is not None and st.st_mtime is not None:
 			connection.utime(str(dst), (st.st_atime, st.st_mtime))
 		else:
-			logger.warning(f"Could not update time metadata: {src}")
+			raise MetadataUpdateError(f"Could not update time metadata: {src}")
 
 	connection:paramiko.sftp_client.SFTPClient
 
@@ -218,10 +216,10 @@ class RemotePath:
 			raise ValueError("Cannot compare RemotePaths with different SSH connections")
 		return str(self) == str(other)
 
-	def __str__(self):
+	def __str__(self) -> str:
 		return self.path
 
-	def __fspath__(self):
+	def __fspath__(self) -> str:
 		return self.path
 
 	def joinpath(self, *other:str|os.PathLike[str]) -> "RemotePath":

@@ -7,68 +7,194 @@ import stat
 import shutil
 import logging
 import tempfile
+from enum import Enum
 from pathlib import Path
 from itertools import islice
 from datetime import datetime
-from typing import Any, Literal, Iterator
+from dataclasses import dataclass, field
+from typing import Any, Literal, Iterator, Counter as CounterType, cast
+from collections import Counter
 
-from .filter import Filter
+from .filter import Filter, PathFilter
 from .helpers import _reverse_dict, _human_readable_size, _error_summary
-from .data import _Metadata, _ScandirEntry, _Operation, Results
 from .sftp import RemotePath, _RemotePathScanner
-from .logging import _DebugInfoFilter, _NonEmptyFilter, _LogFileFormatter
+from .log import logger, _DebugInfoFilter, _NonEmptyFilter, _LogFileFormatter
+from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
 
-logger = logging.getLogger("psync")
+PathLikeType = str | os.PathLike[str]
+PathType = Path | RemotePath
 
-def sync(
-		src              : str | os.PathLike[str],
-		dst              : str | os.PathLike[str],
-		*,
+@dataclass(frozen=True)
+class _Metadata:
+	'''File metadata that will be used to find probable duplicates.'''
 
-		filter           : str  = "+ **/*/ **/*",
-		ignore_hidden    : bool = False,
-		ignore_case      : bool = False,
-		ignore_symlinks  : bool = False,
-		follow_symlinks  : bool = False,
+	size  : int
+	mtime : float
 
-		trash            : str | os.PathLike[str] | None = None,
-		delete_files     : bool = False,
-		force_update     : bool = False,
-		metadata_only    : bool = False,
-		rename_threshold : int | None  = 10000,
+@dataclass(frozen=True)
+class _Entry:
+	'''Filesystem entries yielded by `_scandir()`.'''
 
-		dry_run          : bool = False,
+	normpath : str # normcased and replaced \\ -> /
+	path     : str
 
-		log              : str | os.PathLike[str] | None = None,
-		debug            : bool = False,
-		quiet            : bool = False,
-		veryquiet        : bool = False,
-	) -> Results:
+@dataclass(frozen=True)
+class _File(_Entry):
+	meta     : _Metadata
+
+@dataclass(frozen=True)
+class _EmptyDir(_Entry):
+	pass
+
+@dataclass(frozen=True)
+class Operation:
+	'''Filesystem operation yielded by `_operations()`.'''
+
+	src       : PathType | None
+	dst       : PathType | None
+	byte_diff : int
+	summary   : str
+	name      : str
+
+	def perform(self, sync:"Sync"):
+		raise NotImplementedError()
+
+	def __str__(self):
+		return self.summary
+
+@dataclass(frozen=True)
+class CreateFileOperation(Operation):
+	src  : PathType
+	dst  : PathType
+	name : str = "Create"
+
+	def perform(self, sync:"Sync"):
+		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
+
+@dataclass(frozen=True)
+class UpdateFileOperation(Operation):
+	src  : PathType
+	dst  : PathType
+	name : str = "Update"
+
+	def perform(self, sync:"Sync"):
+		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
+
+@dataclass(frozen=True)
+class RenameFileOperation(Operation):
+	src  : PathType
+	dst  : PathType
+	name : str = "Rename"
+
+	def perform(self, sync:"Sync"):
+		_move(self.src, self.dst)
+		try:
+			for path in _delete_empty_dirs(self.src.parent, sync.dst):
+				sync.logger.debug(f"deleting empty dir: {path}")
+		except DirDeleteError as e:
+			sync.logger.warning(str(e))
+
+@dataclass(frozen=True)
+class DeleteFileOperation(Operation):
+	src  : PathType
+	name : str = "Delete"
+
+	def perform(self, sync:"Sync"):
+		self.src.unlink()
+		try:
+			for path in _delete_empty_dirs(self.src.parent, sync.dst):
+				sync.logger.debug(f"deleting empty dir: {path}")
+		except DirDeleteError as e:
+			sync.logger.warning(str(e))
+
+@dataclass(frozen=True)
+class TrashFileOperation(Operation):
+	src  : PathType
+	dst  : PathType
+	name : str = "»Trash"
+
+	def perform(self, sync:"Sync"):
+		_move(self.src, self.dst)
+		try:
+			for path in _delete_empty_dirs(self.src.parent, sync.dst):
+				sync.logger.debug(f"deleting empty dir: {path}")
+		except DirDeleteError as e:
+			sync.logger.warning(str(e))
+
+@dataclass(frozen=True)
+class CreateDirOperation(Operation):
+	dst  : PathType
+	name : str = "Create Dir"
+
+	def perform(self, sync:"Sync"):
+		self.dst.mkdir(exist_ok=True, parents=True)
+
+@dataclass(frozen=True)
+class DeleteDirOperation(Operation):
+	src  : PathType
+	name : str = "Delete Dir"
+
+	def perform(self, sync:"Sync"):
+		try:
+			for path in _delete_empty_dirs(self.src, sync.dst):
+				sync.logger.debug(f"deleting empty dir: {path}")
+		except DirDeleteError as e:
+			sync.logger.warning(str(e))
+
+class Results:
+	'''Various statistics and other information returned by `sync()`.'''
+
+	class Status(Enum):
+		UNKNOWN              = -1
+		COMPLETED            = 0
+		CONNECTION_ERROR     = 1
+		INTERRUPTED_BY_USER  = 2
+		INTERRUPTED_BY_ERROR = 3
+
+	def __init__(self, sync:"Sync"):
+		self.sync      : "Sync" = sync # needed to reference trash, log, and dry_run
+		self.status    : Results.Status = Results.Status.UNKNOWN
+		self.errors    : list[str] = []
+		self.counts    : CounterType[str] = Counter()
+		self.byte_diff : int = 0
+
+	def tally_success(self, op:Operation):
+		self.counts[f"{op.name} Success"] += 1
+		self.byte_diff += op.byte_diff
+
+	def tally_error(self, op:Operation, err_msg:str):
+		self.counts[f"{op.name} Error"] += 1
+		self.errors.append(err_msg)
+
+	@property
+	def err_count(self) -> int:
+		return sum(v for k,v in self.counts.items() if k.endswith(" Error"))
+
+	def __getitem__(self, key):
+		if isinstance(key, type) and issubclass(key, Operation):
+			return (self.counts[key.name+" Success"], self.counts[key.name+" Error"])
+		else:
+			return self.counts[key]
+
+	def summary(self):
+		status = self.status.name.replace("_", " ").title()
+		if self.sync.dry_run:
+			yield f"       Status: {status} (Dry Run)"
+		else:
+			yield f"       Status: {status}"
+			for key in ["Create", "Update", "Rename", "Delete", "»Trash"]:
+				key_sucess = f"{key} Sucess"
+				key_error  = f"{key} Error"
+				yield f"{key_sucess}: {self[key_sucess]}" + (f" | Failed: {self[key_error]}" if self[key_error] else "")
+			yield f"   Net Change: {_human_readable_size(self.byte_diff)}"
+
+class Sync:
 	'''
-	Copies new and updated files from `src` to `dst`, and optionally "recycles" files from `dst` if they are not present in `src` (they will be moved into `trash`, preserving directory structure). Furthermore, files that exist in `dst` but as a different name in `src` may be renamed in `dst` to match. Candidates for rename are discovered by searching for files with an identical metadata signature, consisting of file size and modification time. These candidates must be above a minimum size threshold (`rename_threshold`) and have an unambiguously unique metadata signature within their respective root directories. The user is asked to confirm these renames before they are committed.
+	`Sync` performs the file sync operation in accordance to several optional arguments, including those related to filtering, matching, deleting, and logging.
 
-	Args
-		src    (str or PathLike) : The path of the root directory to copy files from. Can be a symlink to a directory.
-		dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
+	A default sync operation entails copying new and updated files from `src` to `dst`, recursively and maintaining directory structure. Files in `dst` with the same relative paths as those in `src` are assumed to be related. Files are not deleted by default. Files in `dst` may be renamed to match those in `src`. Candidates for rename are discovered by searching for files with an identical metadata signature, consisting of file size and modification time. These candidates must be above a minimum size threshold (`rename_threshold`) and have an unambiguously unique metadata signature within their respective root directories.
 
-		filter             (str) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to "+ **/*/ **/*", which searches all directories and copies all files.)
-		ignore_hidden     (bool) : Whether to ignore hidden files by default in glob patterns. If `True`, then wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., "**/.*") will still match these file system entries. (Defaults to `False`.)
-		ignore_case       (bool) : Whether to ignore case when comparing files to the filter string. (Defaults to `False`.)
-		ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
-		follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
-
-		trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
-		delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst_root` but not `src_root`). Mutually exclusive with `trash`. (Defaults to `False`.)
-		force_update      (bool) : Whether to replace any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
-		metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
-		rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
-
-		dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
-
-		log    (str or PathLike) : The path of the log file to use. It will be created if it does not exist. A value of "auto" means a tempfile will be used for the log, and it will be copied to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
-		debug             (bool) : Whether to log debug messages. (Default to `False`.)
-		quiet             (bool) : Whether to forgo printing to stdout.
-		veryquiet         (bool) : Whether to forgo printing to stdout and stderr.
+	Files can be optionally "recycled" from `dst` if they are not present in `src` (they will be moved into `trash`, preserving directory structure) or they can be deleted.
 
 	Example Console Output
 		   path/to/src
@@ -93,79 +219,388 @@ def sync(
 		Net Change: 0 bytes
 
 		Log file: path/to/log/psync_20251015_201523.log
-
-	Returns
-		A `Results` object containing various statistics.
 	'''
-	results = Results()
 
-	logger.setLevel(logging.DEBUG)
-	if logger.handlers:
-		for handler in list(logger.handlers):
-			logger.removeHandler(handler)
+	class _SyncState(Enum):
+		INVALID    = 0
+		READY      = 1
+		RUNNING    = 2
+		TERMINATED = 3
 
-	log_file       = None
-	handler_stdout = None
-	handler_stderr = None
-	handler_file   = None
+	valid_kwargs = [
+		"filter",
+		"trash",
+		"delete_files",
+		"force_update",
+		"metadata_only",
+		"rename_threshold",
+		"ignore_symlinks",
+		"follow_symlinks",
+		"dry_run",
+		"log_file",
+		"log_level",
+		"print_level",
+	]
 
-	if veryquiet:
-		quiet = True
+	def __init__(self, src:PathLikeType, dst:PathLikeType, **kwargs):
+		'''
+		Initialize a Sync object.
 
-	if not quiet:
-		handler_stdout = logging.StreamHandler(sys.stdout)
-		handler_stdout.setFormatter(logging.Formatter("%(message)s"))
-		handler_stdout.addFilter(_DebugInfoFilter())
-		if debug:
-			handler_stdout.setLevel(logging.DEBUG)
+		Args
+			src    (str or PathLike) : The path of the root directory to copy files from. Can be a symlink to a directory.
+			dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
+
+			filter   (str or Filter) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to "+ **/*/ **/*", which searches all directories and copies all files.)
+			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
+			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
+
+			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
+			delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst` but not `src`). Mutually exclusive with `trash`. (Defaults to `False`.)
+			force_update      (bool) : Whether to allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
+			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
+			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
+
+			dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
+
+			log    (str or PathLike) : The path of the log file to use. It will be created if it does not exist. A value of "auto" means a tempfile will be used for the log, and it will be copied to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
+			log_level          (int) : Log level for logging to file. (Default to `logging.DEBUG`.)
+			print_level        (int) : Log level for printing to console. (Default to `logging.INFO`.)
+
+		Returns
+			A `Results` object containing various statistics.
+		'''
+		self._state = Sync._SyncState.INVALID
+
+		self._src : PathType
+		self._dst : PathType
+
+		self.src = src
+		self.dst = dst
+
+		self._filter           : Filter = PathFilter("+ **/*/ **/*")
+		self._trash            : PathType|None = None
+		self._delete_files     : bool = False
+		self._force_update     : bool = False
+		self._metadata_only    : bool = False
+		self._rename_threshold : int|None = 10000
+		self._ignore_symlinks  : bool = False
+		self._follow_symlinks  : bool = False
+		self._dry_run          : bool = False
+		self._log_file         : PathType|None = None
+		self._log_level        : int = logging.DEBUG
+
+		# This isn't a problem because dirs are walked in their entirety before operations are performed
+		# If this changes in the furture, should also check that src or dst isn't nested in the other
+		#if src.resolve() == dst.resolve():
+		#	raise ValueError(f"'src' and 'dst' point to the same directory")
+
+		self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+		self.sftp_compat = isinstance(self.src, RemotePath) or isinstance(self.dst, RemotePath)
+		self.results = Results(self)
+
+		# self.logger will handle records related to a sync operation
+		logger_name = f"psync.{self.timestamp}"
+		if logger_name in logging.Logger.manager.loggerDict:
+			logger_name += f"_{id(self)}"
+
+		self.logger = logging.getLogger(logger_name)
+		self.logger.propagate = False
+		self.logger.setLevel(logging.DEBUG)
+		self.handler_stdout = logging.StreamHandler(sys.stdout)
+		self.handler_stderr = logging.StreamHandler(sys.stderr)
+		self.handler_file : logging.FileHandler|None = None
+		self.handler_stdout.addFilter(_DebugInfoFilter())
+		self.handler_stdout.setLevel(logging.INFO)
+		self.handler_stderr.setLevel(logging.WARNING)
+		self.logger.addHandler(self.handler_stdout)
+		self.logger.addHandler(self.handler_stderr)
+
+		for key in kwargs:
+			if key not in Sync.valid_kwargs:
+				raise AttributeError(f"'{key}' is not a valid parameter for a Sync object.")
+			setattr(self, key, kwargs[key])
+
+		self._state = Sync._SyncState.READY
+
+	@property
+	def src(self) -> PathType:
+		return self._src
+
+	@src.setter
+	def src(self, val:PathLikeType) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		self._state = Sync._SyncState.INVALID
+
+		if not isinstance(val, str|os.PathLike):
+			raise TypeError(f"Bad type for property 'src' (expected {PathLikeType}): {val}")
+
+		src: PathType
+		if isinstance(val, PathType):
+			src = val
 		else:
-			handler_stdout.setLevel(logging.INFO)
-		logger.addHandler(handler_stdout)
+			assert isinstance(val, str)
+			if "@" in val:
+				src = RemotePath.create(val)
+			else:
+				val = os.path.expanduser(val)
+				val = os.path.expandvars(val)
+				src = Path(val)
 
-	if not veryquiet:
-		handler_stderr = logging.StreamHandler(sys.stderr)
-		handler_stderr.setFormatter(logging.Formatter("%(message)s"))
-		handler_stderr.setLevel(logging.WARNING)
-		logger.addHandler(handler_stderr)
+		assert isinstance(src, PathType)
+		if src.exists() and not src.is_dir():
+			raise ValueError(f"'src' is not a directory: {val}")
+		if not src.exists():
+			raise ValueError(f"'src' does not exist: {val}")
 
-	try:
-		if not isinstance(src, (str, os.PathLike)):
-			raise TypeError(f"Bad type for arg 'src' (expected str or PathLike): {src}")
-		if not isinstance(dst, (str, os.PathLike)):
-			raise TypeError(f"Bad type for arg 'dst' (expected str or PathLike): {dst}")
-		if trash is not None and not isinstance(trash, (str, os.PathLike)):
-			raise TypeError(f"Bad type for arg 'trash' (expected str or PathLike): {trash}")
-		if not isinstance(delete_files, bool):
-			raise TypeError(f"Bad type for arg 'delete_files' (expected bool): {trash}")
-		if not isinstance(filter, str):
-			raise TypeError(f"Bad type for arg 'filter' (expected str): {filter}")
-		if not isinstance(ignore_hidden, bool):
-			raise TypeError(f"Bad type for arg 'ignore_hidden' (expected bool): {ignore_hidden}")
-		if rename_threshold is not None and not isinstance(rename_threshold, int):
-			raise TypeError(f"Bad type for arg 'rename_threshold' (expected int): {rename_threshold}")
-		if not isinstance(metadata_only, bool):
-			raise TypeError(f"Bad type for arg 'metadata_only' (expected bool): {metadata_only}")
-		if not isinstance(dry_run, bool):
-			raise TypeError(f"Bad type for arg 'dry_run' (expected bool): {dry_run}")
-		if log is not None and not isinstance(log, (str, os.PathLike)):
-			raise TypeError(f"Bad type for arg 'log' (expected str or PathLike): {log}")
-		if not isinstance(quiet, bool):
-			raise TypeError(f"Bad type for arg 'quiet' (expected bool): {quiet}")
-		if not isinstance(veryquiet, bool):
-			raise TypeError(f"Bad type for arg 'veryquiet' (expected bool): {veryquiet}")
+		if hasattr(self, "_dst") and self.dst:
+			self._state = Sync._SyncState.READY
 
-		timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+		self._src = src
 
-		if log is None:
-			log_file = None
-		elif log == "auto":
-			log_file = Path.home() / f"psync_{timestamp}.log"
+	@property
+	def dst(self) -> PathType:
+		return self._dst
+
+	@dst.setter
+	def dst(self, val:PathLikeType) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		self._state = Sync._SyncState.INVALID
+
+		if not isinstance(val, str|os.PathLike):
+			raise TypeError(f"Bad type for property 'dst' (expected {PathLikeType}): {val}")
+
+		dst: PathType
+		if isinstance(val, PathType):
+			dst = val
 		else:
-			log_file = Path(log)
-		results.log_file = log_file
+			assert isinstance(val, str)
+			if "@" in val:
+				dst = RemotePath.create(val)
+			else:
+				val = os.path.expanduser(val)
+				val = os.path.expandvars(val)
+				dst = Path(val)
 
-		tmp_log_file = None
-		if log_file is not None:
+		assert isinstance(dst, PathType)
+		if dst.exists() and not dst.is_dir():
+			raise ValueError(f"'dst' is not a directory: {val}")
+
+		if hasattr(self, "_trash") and self.trash:
+			if isinstance(dst, RemotePath) and not isinstance(self.trash, RemotePath):
+				raise ValueError(f"'trash' is not on the same file system as 'dst': {self.trash}")
+
+			if not isinstance(dst, RemotePath) and isinstance(self.trash, RemotePath):
+				raise ValueError(f"'trash' is not on the same file system as 'dst': {self.trash}")
+
+			# st_dev is not available over SFTP
+			# TODO check also when dst doesn't exist by making a temp dir
+			if not isinstance(dst, RemotePath) and dst.exists():
+				if os.stat(self.trash).st_dev != os.stat(self.dst).st_dev:
+					raise ValueError(f"'trash' is not on the same file system as 'dst': {self.trash}")
+
+		if hasattr(self, "_src") and self.src:
+			self._state = Sync._SyncState.READY
+
+		self._dst = dst
+
+	@property
+	def filter(self) -> Filter:
+		return self._filter
+
+	@filter.setter
+	def filter(self, val:str|Filter) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, str|Filter):
+			raise TypeError(f"Bad type for property 'filter' (expected str|Filter): {val}")
+
+		filter: Filter
+		if isinstance(val, str):
+			val  = val.replace("\\", "/") if self.sftp_compat and os.name == "nt" else val
+			filter = PathFilter(val)
+		else:
+			filter = val
+
+		assert isinstance(filter, Filter)
+		self._filter = filter
+
+	@property
+	def trash(self) -> PathType|None:
+		return self._trash
+
+	@trash.setter
+	def trash(self, val:PathLikeType|None) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if val is None:
+			self._trash = None
+			return
+
+		if not isinstance(val, str|os.PathLike):
+			raise TypeError(f"Bad type for property 'trash' (expected {PathLikeType}): {val}")
+		if self.delete_files:
+			raise RuntimeError("Mutually exclusive properties: 'trash' and 'delete_files'")
+
+		trash: PathType
+		if isinstance(val, PathType):
+			trash = val
+		else:
+			assert isinstance(val, str)
+			if val == "auto":
+				trash = self.dst.parent / f"Trash_{self.timestamp}"
+			elif "@" in val:
+				#try:
+				trash = RemotePath.create(val)
+				#except (ValueError, ImportError) as e:
+				#	raise ValueError(str(e)) from e
+			else:
+				val = os.path.expanduser(val)
+				val = os.path.expandvars(val)
+				trash = Path(val)
+
+		assert isinstance(trash, PathType)
+		if trash.exists() and not trash.is_dir():
+			raise ValueError(f"'trash' is not a directory: {val}")
+
+		# st_dev is not available over SFTP
+		if not self.sftp_compat and trash.exists():
+			if os.stat(trash).st_dev != os.stat(self.dst).st_dev:
+				raise ValueError(f"'trash' is not on the same file system as 'dst': {trash}")
+
+		self._trash = trash
+
+	@property
+	def delete_files(self) -> bool:
+		return self._delete_files
+
+	@delete_files.setter
+	def delete_files(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'delete_files' (expected bool): {val}")
+		if val and self.trash:
+			raise RuntimeError("Mutually exclusive properties: 'trash' and 'delete_files'")
+		self._delete_files = val
+
+	@property
+	def force_update(self) -> bool:
+		return self._force_update
+
+	@force_update.setter
+	def force_update(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'force_update' (expected bool): {val}")
+		self._force_update = val
+
+	@property
+	def metadata_only(self) -> bool:
+		return self._metadata_only
+
+	@metadata_only.setter
+	def metadata_only(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'metadata_only' (expected bool): {val}")
+		self._metadata_only = val
+
+	@property
+	def rename_threshold(self) -> int|None:
+		return self._rename_threshold
+
+	@rename_threshold.setter
+	def rename_threshold(self, val:int|None) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if val is None:
+			self._rename_threshold = None
+			return
+
+		if not isinstance(val, int):
+			raise TypeError(f"Bad type for arg 'rename_threshold' (expected int): {val}")
+		self._rename_threshold = val
+
+	@property
+	def ignore_symlinks(self) -> bool:
+		return self._ignore_symlinks
+
+	@ignore_symlinks.setter
+	def ignore_symlinks(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'ignore_symlinks' (expected bool): {val}")
+		if val and self.follow_symlinks:
+			raise RuntimeError("Mutually exclusive properties: 'follow_symlinks' and 'ignore_symlinks'")
+		self._ignore_symlinks = val
+
+	@property
+	def follow_symlinks(self) -> bool:
+		return self._follow_symlinks
+
+	@follow_symlinks.setter
+	def follow_symlinks(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'follow_symlinks' (expected bool): {val}")
+		if val and self.ignore_symlinks:
+			raise RuntimeError("Mutually exclusive properties: 'ignore_symlinks' and 'follow_symlinks'")
+		self._follow_symlinks = val
+
+	@property
+	def dry_run(self) -> bool:
+		return self._dry_run
+
+	@dry_run.setter
+	def dry_run(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'dry_run' (expected bool): {val}")
+		self._dry_run = val
+
+	@property
+	def log_file(self) -> PathType|None:
+		return self._log_file
+
+	@log_file.setter
+	def log_file(self, val:PathLikeType) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		# TODO accept RemotePath
+		if val is not None and not isinstance(val, str|os.PathLike):
+			raise TypeError(f"Bad type for property 'log_file' (expected {str|os.PathLike}): {val}")
+
+		log_file = val
+		if log_file is None:
+			pass
+		elif log_file == "auto":
+			log_file = Path.home() / f"{self.logger.name}.log"
+		else:
+			log_file = Path(log_file)
+
+		if log_file is None:
+			tmp_log_file = None
+			handler_file = None
+		else:
 			if log_file.exists():
 				if not log_file.is_file():
 					raise ValueError(f"'log' is not a file: {log_file}")
@@ -177,595 +612,453 @@ def sync(
 			handler_file = logging.FileHandler(tmp_log_file, encoding="utf-8")
 			handler_file.setFormatter(_LogFileFormatter())
 			handler_file.addFilter(_NonEmptyFilter())
-			#if debug:
-			handler_file.setLevel(logging.DEBUG)
-			#else:
-			#	handler_file.setLevel(logging.INFO)
-			logger.addHandler(handler_file)
+			if self.handler_file:
+				self._log_level = self.handler_file.level
+			handler_file.setLevel(self._log_level)
+			self.logger.addHandler(handler_file)
 
-		width = max(len(str(src)), len(str(dst))) + 3
-		logger.info("   " + str(src))
-		logger.info("-> " + str(dst))
-		logger.info("-" * width)
+		self.close_file_handler()
 
-		src = str(src)
-		dst = str(dst)
-		trash = str(trash) if trash else None
+		self._log_file = log_file
+		self._tmp_log_file = tmp_log_file
+		self.handler_file = handler_file
 
-		src_root   : Path|RemotePath
-		dst_root   : Path|RemotePath
-		trash_root : Path|RemotePath|None = None
+	@property
+	def log_level(self) -> int:
+		return self._log_level
 
-		if "@" in src:
-			try:
-				src_root = RemotePath.create(str(src))
-			except (ValueError, ImportError) as e:
-				raise ValueError(str(e)) from e
-		else:
-			src = os.path.expanduser(src)
-			src = os.path.expandvars(src)
-			src_root = Path(src)
-		if "@" in dst:
-			try:
-				dst_root = RemotePath.create(str(dst))
-			except (ValueError, ImportError) as e:
-				raise ValueError(str(e)) from e
-		else:
-			dst = os.path.expanduser(dst)
-			dst = os.path.expandvars(dst)
-			dst_root = Path(dst)
+	@log_level.setter
+	def log_level(self, val:int) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
 
-		if trash is None:
-			trash_root = None
-		elif trash == "auto":
-			trash_root = dst_root.parent / f"Trash_{timestamp}"
-		elif "@" in trash:
-			try:
-				trash_root = RemotePath.create(str(trash))
-			except (ValueError, ImportError) as e:
-				raise ValueError(str(e)) from e
-		else:
-			trash = os.path.expanduser(trash)
-			trash = os.path.expandvars(trash)
-			trash_root = Path(trash) / timestamp
-		results.trash_root = trash_root
+		if not isinstance(val, int):
+			raise TypeError(f"Bad type for property 'log_level' (expected int): {val}")
+		self._log_level = val
+		if self.handler_file:
+			self.handler_file.level = self._log_level
 
-		# st_dev is not available over SFTP
-		if trash_root is not None and not isinstance(dst_root, RemotePath) and not isinstance(trash_root, RemotePath) and trash_root.exists():
-			if os.stat(trash_root).st_dev != os.stat(dst_root).st_dev:
-				raise ValueError(f"'trash_root' is not on the same file system as 'dst_root': {trash_root}")
+	@property
+	def print_level(self) -> int:
+		return self.handler_stdout.level
 
-		if src_root.exists() and not src_root.is_dir():
-			raise ValueError(f"'src' is not a directory: {src_root}")
-		if dst_root.exists() and not dst_root.is_dir():
-			raise ValueError(f"'dst' is not a directory: {dst_root}")
-		# This isn't a problem because dirs are walked in their entirety before operations are performed
-		# If this changes in the furture, should also check that src or dst isn't nested in the other
-		#if src_root.resolve() == dst_root.resolve():
-		#	raise ValueError(f"'src' and 'dst' point to the same directory")
-		if trash_root is not None and trash_root.exists() and not trash_root.is_dir():
-			raise ValueError(f"'trash_root' is not a directory: {trash_root}")
-		if trash_root and delete_files:
-			raise ValueError("Mutually exclusive arguments: 'trash_root' and 'delete_files'")
+	@print_level.setter
+	def print_level(self, val:int) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
 
-		if ignore_symlinks and follow_symlinks:
-			raise ValueError("Mutually exclusive arguments: 'ignore_symlinks' and 'follow_symlinks'")
+		if not isinstance(val, int):
+			raise TypeError(f"Bad type for property 'print_level' (expected int): {val}")
+		self.handler_stdout.level = val
+		self.handler_stderr.level = max(val, logging.WARNING)
 
-		if rename_threshold is not None and rename_threshold < 0:
-			raise ValueError(f"'rename_threshold' must be non-negative: {rename_threshold}")
+	def close_file_handler(self) -> None:
+		if self.handler_file:
+			self.logger.removeHandler(self.handler_file)
+			self.handler_file.close()
+			assert self._tmp_log_file
+			assert self.log_file
+			self._tmp_log_file.replace(self.log_file)
 
-		sftp_compat = isinstance(src_root, RemotePath) or isinstance(dst_root, RemotePath)
-		filter = filter.replace("\\", "/") if sftp_compat and os.sep == "\\" else filter
-
-		logger.debug("")
-		logger.debug(f"Starting backup: {src_root=} {dst_root=} {filter=} {ignore_hidden=} {ignore_case=} {ignore_symlinks=} {follow_symlinks=} {trash_root=} {trash_root=} {delete_files=} {force_update=} {metadata_only=} {rename_threshold=} {dry_run=} {log_file=} {debug=} {quiet=} {veryquiet=} {sftp_compat=}")
-		logger.debug("")
-
-		#width = max(len(str(src_root)), len(str(dst_root))) + 3
-		#logger.info("   " + str(src_root))
-		#logger.info("-> " + str(dst_root))
-		#logger.info("-" * width)
-
-		src_files = _scandir(src_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, ignore_symlinks=ignore_symlinks, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
-		dst_files = _scandir(dst_root, filter=filter, ignore_hidden=ignore_hidden, ignore_case=ignore_case, ignore_symlinks=ignore_symlinks, follow_symlinks=follow_symlinks, sftp_compat=sftp_compat)
-
-		for op in _operations(
-			src_root         = src_root,
-			dst_root         = dst_root,
-			src_files        = src_files,
-			dst_files        = dst_files,
-			trash_root       = trash_root,
-			delete_files     = delete_files,
-			force_update     = force_update,
-			rename_threshold = rename_threshold,
-			metadata_only    = metadata_only,
-		):
-			logger.info(op.summary)
-
-			if not dry_run:
-				if op.category == _Operation.Category.RENAME_FILE:
-					try:
-						_move(op.src, op.dst)
-						_delete_empty_dirs(op.src.parent, dst_root)
-						results.rename_success += 1
-					except OSError as e:
-						results.rename_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op.category == _Operation.Category.DELETE_FILE:
-					try:
-						op.src.unlink()
-						_delete_empty_dirs(op.src.parent, dst_root)
-						results.delete_success += 1
-						results.byte_diff += op.byte_diff
-					except OSError as e:
-						results.delete_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op.category == _Operation.Category.TRASH_FILE:
-					try:
-						_move(op.src, op.dst)
-						_delete_empty_dirs(op.src.parent, dst_root)
-						results.delete_success += 1
-						results.byte_diff += op.byte_diff
-					except OSError as e:
-						results.delete_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op.category == _Operation.Category.CREATE_FILE:
-					try:
-						_copy(op.src, op.dst, follow_symlinks=follow_symlinks)
-						results.create_success += 1
-						results.byte_diff += op.byte_diff
-					except OSError as e:
-						results.create_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op.category == _Operation.Category.UPDATE_FILE:
-					try:
-						_copy(op.src, op.dst, follow_symlinks=follow_symlinks)
-						results.update_success += 1
-						results.byte_diff += op.byte_diff
-					except OSError as e:
-						results.update_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op.category == _Operation.Category.CREATE_DIR:
-					try:
-						op.dst.mkdir(exist_ok=True, parents=True)
-						results.dir_create_success += 1
-					except OSError as e:
-						results.dir_create_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				elif op.category == _Operation.Category.DELETE_DIR:
-					try:
-						_delete_empty_dirs(op.src, dst_root)
-						results.dir_delete_success += 1
-					except OSError as e:
-						results.dir_delete_error += 1
-						msg = "  " + _error_summary(e)
-						logger.error(msg)
-						results.errors.append(msg)
-				else:
-					raise RuntimeError(f"Unrecognized operation: {op}")
-
-		results.status = Results.Status.COMPLETED
-
-	except KeyboardInterrupt:
-		results.status = Results.Status.INTERRUPTED_BY_USER
-	except ValueError as e:
-		logger.info("")
-		logger.critical(f"Input Error: {e}", exc_info=debug)
-		results.status = Results.Status.INPUT_ERROR
-	except ConnectionError as e:
-		logger.info("")
-		logger.critical(f"Connection Error: {e}", exc_info=debug)
-		results.status = Results.Status.CONNECTION_ERROR
-	except Exception as e:
-		logger.info("")
-		logger.critical("An unexpected error occurred.", exc_info=True)
-		results.status = Results.Status.INTERRUPTED_BY_ERROR
-	finally:
-		logger.info("")
-		logger.info("Summary")
-		logger.info("-------")
-		if dry_run:
-			logger.info(f"Status: {results.status} (Dry Run)")
-		else:
-			logger.info(f"Status: {results.status}")
-			logger.info(f"Create Success: {results.create_success}" + (f" | Failed: {results.create_error}" if results.create_error else ""))
-			logger.info(f"Update Success: {results.update_success}" + (f" | Failed: {results.update_error}" if results.update_error else ""))
-			logger.info(f"Rename Success: {results.rename_success}" + (f" | Failed: {results.rename_error}" if results.rename_error else ""))
-			logger.info(f"Delete Success: {results.delete_success}" + (f" | Failed: {results.delete_error}" if results.delete_error else ""))
-			logger.info(f"»Trash Success: {results.delete_success}" + (f" | Failed: {results.trash_error}"  if results.trash_error  else ""))
-			logger.info(f"Net Change: {_human_readable_size(results.byte_diff)}")
-			logger.info("")
-
-		if results.err_count:
-			logger.info("")
-			logger.info(f"There were {results.err_count} errors.")
-			if results.err_count <= 10:
-				logger.info("Errors are reprinted below for convenience.")
-				for error in results.errors:
-					logger.info(error)
-
-		if log_file:
-			logger.info("")
-			logger.info(f"Log file: {log_file}")
-
-		if handler_stdout:
-			logger.removeHandler(handler_stdout)
-
-		if handler_stderr:
-			logger.removeHandler(handler_stderr)
-
-		if handler_file:
-			logger.removeHandler(handler_file)
-			handler_file.close()
-			assert tmp_log_file is not None
-			assert log_file is not None
-			tmp_log_file.replace(log_file)
-
-	return results
-
-def _scandir(root:Path|RemotePath, *, filter:str = "+ **/*/ **/*", ignore_hidden:bool = False, ignore_case:bool = False, ignore_symlinks:bool = False, follow_symlinks:bool = False, sftp_compat:bool = False) -> Iterator[_ScandirEntry]:
-	'''
-	Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.
-
-    Args
-		root (Path|RemotePath) : The directory to search.
-		filter           (str) : The filter to include/exclude files and directories. Include file system entries by preceding a space-separated list with "+", and exclude with "-". Included files will be copied, while included directories will be searched. Each pattern ending with a slash will only apply to directories. Otherise the pattern will only apply to files. (Defaults to `+ **/*/ **/*`.)
-		ignore_hidden   (bool) : Whether to skip hidden files by default. If `True`, then wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., "**/.*") will still match these file system entries. (Defaults to `False`.)
-		ignore_case     (bool) : Whether to ignore case when comparing files to the filter string. (Defaults to `False`.)
-		follow_symlinks (bool) : Whether to follow symbolic links under `root`. Note that `root` itself will be followed regardless of this argument. (Defaults to `False`.)
-		sftp_compat     (bool) : Whether to work in SFTP compatibility mode, which will truncate milliseconds off the file modification times, treat file names case-sensitively on Windows, and return paths with forward slashes. (Defaults to `False`.)
-	'''
-
-	f = Filter(filter, ignore_hidden=ignore_hidden)
-
-	convert_sep = sftp_compat and os.sep == "\\" and not isinstance(root, RemotePath)
-	display_sep = "/" if sftp_compat else os.sep
-
-	for dir, dir_entries, file_entries in _walk(root, ignore_symlinks=ignore_symlinks, follow_symlinks=follow_symlinks):
-		logger.debug(f"scanning: {dir}")
-
-		dir_relpath = str(dir.relative_to(root))
-		normed_dir_relpath = dir_relpath
-		if convert_sep:
-			normed_dir_relpath = normed_dir_relpath.replace("\\", "/")
-			dir_relpath = dir_relpath.replace("\\", "/")
-		if not sftp_compat:
-			normed_dir_relpath = os.path.normcase(normed_dir_relpath)
-
-		# empty directory
-		if dir_relpath != "." and not file_entries and not dir_entries and f.filter(dir_relpath + display_sep):
-			yield _ScandirEntry(
-				category = _ScandirEntry.Category.EMPTY_DIR,
-				normpath = normed_dir_relpath,
-				path     = dir_relpath,
-				meta     = _Metadata(size=0, mtime=-1),
-			)
-			continue
-
-		# prune search tree
-		i = 0
-		while i < len(dir_entries):
-			subdirname = dir_entries[i].name
-			subdir_path = dir / subdirname
-			subdir_relpath = str(subdir_path.relative_to(root))
-			if not f.filter(subdir_relpath + display_sep):
-				del dir_entries[i]
-				continue
-			i += 1
-
-		# prune files
-		for entry in file_entries:
-			filename = entry.name
-			file_path = dir / filename
-			file_relpath = str(file_path.relative_to(root))
-
-			normed_file_relpath = file_relpath
-			if convert_sep:
-				normed_file_relpath = normed_file_relpath.replace("\\", "/")
-				file_relpath = file_relpath.replace("\\", "/")
-			if not sftp_compat:
-				normed_file_relpath = os.path.normcase(normed_file_relpath)
-
-			if (f.filter(file_relpath)):
-				stat = entry.stat(follow_symlinks=follow_symlinks)
-				mtime = stat.st_mtime
-				if sftp_compat:
-					mtime = float(int(mtime))
-
-				yield _ScandirEntry(
-					category = _ScandirEntry.Category.FILE,
-					normpath = normed_file_relpath,
-					path     = file_relpath,
-					meta     = _Metadata(size=stat.st_size, mtime=mtime),
-				)
-
-def _walk(top:Path|RemotePath, *,  ignore_symlinks:bool = False, follow_symlinks:bool = False):
-	stack        : list[Any] = [top]
-	visited_dirs : set[str]  = set()
-
-	assert not isinstance(top, str)
-
-	while stack:
-		top = stack.pop()
-
-		if follow_symlinks:
-			if isinstance(top, str):
-				visited_dirs.remove(top)
-				continue
-			d = str(top.resolve())
-			if d in visited_dirs:
-				logger.warning(f"Symlink circular reference: {top} -> {d}")
-				continue
-			stack.append(d)
-			visited_dirs.add(d)
+	def _walk(self, top:PathType) -> Iterator[tuple[PathType, list[os.DirEntry|RemotePath], list[os.DirEntry|RemotePath]]]:
+		stack        : list[Any] = [top]
+		visited_dirs : set[str]  = set()
 
 		assert not isinstance(top, str)
 
-		dirs    = []
-		nondirs = []
+		while stack:
+			top = stack.pop()
 
-		try:
-			scanner = _RemotePathScanner(top) if isinstance(top, RemotePath) else os.scandir(top)
-			with scanner as entries:
-				for entry in entries:
-					try:
-						if ignore_symlinks and entry.is_symlink():
-							continue
-						if follow_symlinks:
-							is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
-						else:
-							is_dir = entry.is_dir(follow_symlinks=False)
-					except OSError as e:
-						logger.warning(e)
-						continue
+			if self.follow_symlinks:
+				if isinstance(top, str):
+					visited_dirs.remove(top)
+					continue
+				d = str(top.resolve())
+				if d in visited_dirs:
+					self.logger.warning(f"Symlink circular reference: {top} -> {d}")
+					continue
+				stack.append(d)
+				visited_dirs.add(d)
 
-					if is_dir:
-						dirs.append(entry)
-					else:
-						nondirs.append(entry)
-		except OSError as e:
-			logger.warning(e)
-			continue
+			assert not isinstance(top, str)
 
-		#dirs.sort(key=lambda x: x.name)
-		#nondirs.sort(key=lambda x: x.name)
+			dirs    = []
+			nondirs = []
 
-		yield top, dirs, nondirs
-
-		# Traverse into sub-directories
-		for dir in reversed(dirs):
-			# in case dir symlink status changed after yield
-			new_path = top / dir.name
-			if follow_symlinks or not new_path.is_symlink():
-				stack.append(new_path)
-
-def _operations(
-		*,
-		src_root         : Path | RemotePath,
-		dst_root         : Path | RemotePath,
-		src_files        : Iterator[_ScandirEntry],
-		dst_files        : Iterator[_ScandirEntry],
-		trash_root       : Path | RemotePath | None,
-		delete_files     : bool,
-		force_update     : bool,
-		metadata_only    : bool,
-		rename_threshold : int | None,
-	):
-	'''Generator of file system operations to perform for this backup.'''
-
-	display_sep = "/" if isinstance(src_root, RemotePath) or isinstance(dst_root, RemotePath) else os.sep
-
-	src_real_names = {}
-	dst_real_names = {}
-
-	src_meta = {}
-	dst_meta = {}
-
-	src_relpaths = set()
-	dst_relpaths = set()
-
-	src_empty_dirs = set()
-	dst_empty_dirs = set()
-
-	for src_entry in src_files:
-		src_real_names[src_entry.normpath] = src_entry.path
-		src_meta[src_entry.normpath] = src_entry.meta
-		if src_entry.category == _ScandirEntry.Category.FILE:
-			src_relpaths.add(src_entry.normpath)
-		elif src_entry.category == _ScandirEntry.Category.EMPTY_DIR:
-			src_empty_dirs.add(src_entry.normpath)
-
-	for dst_entry in dst_files:
-		dst_real_names[dst_entry.normpath] = dst_entry.path
-		dst_meta[dst_entry.normpath] = dst_entry.meta
-		if dst_entry.category == _ScandirEntry.Category.FILE:
-			dst_relpaths.add(dst_entry.normpath)
-		elif dst_entry.category == _ScandirEntry.Category.EMPTY_DIR:
-			dst_empty_dirs.add(dst_entry.normpath)
-
-	logger.debug(f"{len(src_relpaths)=}")
-	logger.debug(f"{len(dst_relpaths)=}")
-
-	src_only_relpaths = sorted(src_relpaths.difference(dst_relpaths))
-	dst_only_relpaths = sorted(dst_relpaths.difference(src_relpaths))
-	both_relpaths     = sorted(src_relpaths.intersection(dst_relpaths))
-
-	# Ignore remote files with invalid characters when copying to Windows
-	if os.sep == "\\" and isinstance(src_root, RemotePath):
-		for path in src_only_relpaths.copy():
-			if os.path.isreserved(path) or "\\" in path:
-				logger.warning(f"Ignoring incompatible remote file: {path}")
-				src_only_relpaths.remove(path)
-
-	logger.debug(f"{len(src_only_relpaths)=}")
-	logger.debug(f"{len(dst_only_relpaths)=}")
-	logger.debug(f"{len(both_relpaths)=}")
-
-	logger.debug(f"{list(islice(src_only_relpaths, 10))=}")
-	logger.debug(f"{list(islice(dst_only_relpaths, 10))=}")
-	logger.debug(f"{list(islice(both_relpaths, 10))=}")
-
-	# Delete empty directories now in case any new files needs to take their places
-	dst_only_empty_dirs = dst_empty_dirs.difference(src_empty_dirs)
-	for relpath in dst_only_empty_dirs:
-		dst_relpath_real = dst_real_names[relpath]
-		src = dst_root / dst_relpath_real
-		assert not any(src.iterdir())
-		yield _Operation(
-			category = _Operation.Category.DELETE_DIR,
-			src = src,
-			dst = None,
-			byte_diff = 0,
-			summary = f"- {dst_relpath_real}{display_sep}"
-		)
-
-	# Rename files
-	if rename_threshold is not None:
-		src_only_relpath_from_meta = _reverse_dict({path:src_meta[path] for path in src_only_relpaths})
-		dst_only_relpath_from_meta = _reverse_dict({path:dst_meta[path] for path in dst_only_relpaths})
-
-		for dst_relpath in list(dst_only_relpaths): # dst_only_relpaths is changed inside the loop
-			# Ignore small files
-			if dst_meta[dst_relpath].size < rename_threshold:
-				continue
 			try:
-				rename_to = src_only_relpath_from_meta[dst_meta[dst_relpath]]
-				# Ignore if there are multiple candidates
-				if rename_to is None:
-					continue
+				scanner = _RemotePathScanner(top) if isinstance(top, RemotePath) else os.scandir(top)
+				with scanner as entries:
+					for entry in entries:
+						try:
+							if self.ignore_symlinks and entry.is_symlink():
+								continue
+							if self.follow_symlinks:
+								is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+							else:
+								is_dir = entry.is_dir(follow_symlinks=False)
+						except OSError as e:
+							self.logger.warning(e)
+							continue
 
-				rename_from = dst_only_relpath_from_meta[dst_meta[dst_relpath]]
-				# Ignore if there are multiple candidates
-				if rename_from is None:
-					continue
-
-				# Ignore if last 1kb do not match
-				if not metadata_only:
-					on_dst = dst_root / rename_from
-					on_src = src_root / rename_to
-					if not _last_bytes(on_src) == _last_bytes(on_dst):
-						continue
-
-				src_only_relpaths.remove(rename_to)
-				dst_only_relpaths.remove(rename_from)
-
-				rename_from = dst_real_names[rename_from]
-				rename_to = src_real_names[rename_to]
-
-				src = dst_root / rename_from
-				dst = dst_root / rename_to
-
-				yield _Operation(
-					category = _Operation.Category.RENAME_FILE,
-					src = src,
-					dst = dst,
-					byte_diff = 0,
-					summary = f"R {rename_from} -> {rename_to}"
-				)
-
-			except KeyError:
-				# dst file not a result of a rename
+						if is_dir:
+							dirs.append(entry)
+						else:
+							nondirs.append(entry)
+			except OSError as e:
+				# top does not exist or user has no read access
+				self.logger.warning(e)
 				continue
 
-	# Delete files
-	if delete_files:
-		for dst_relpath in dst_only_relpaths:
-			dst_relpath_real = dst_real_names[dst_relpath]
-			src = dst_root / dst_relpath_real
-			byte_diff = -dst_meta[dst_relpath].size
-			yield _Operation(
-				category = _Operation.Category.DELETE_FILE,
+			#dirs.sort(key=lambda x: x.name)
+			#nondirs.sort(key=lambda x: x.name)
+
+			yield top, dirs, nondirs
+
+			# Traverse into sub-directories
+			for dir in reversed(dirs):
+				# in case dir symlink status changed after yield
+				new_path = top / dir.name
+				if self.follow_symlinks or not new_path.is_symlink():
+					stack.append(new_path)
+
+	def _scandir(self, root:PathType) -> Iterator[_Entry]:
+		'''Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.'''
+
+		filter = self.filter.filter
+
+		convert_sep = self.sftp_compat and os.name == "nt" and not isinstance(root, RemotePath)
+		display_sep = "/" if self.sftp_compat else os.sep
+
+		for dir, dir_entries, file_entries in self._walk(root):
+			self.logger.debug(f"scanning: {dir}")
+
+			dir_relpath = str(_relative_to(dir, root))
+			normed_dir_relpath = dir_relpath
+			if convert_sep:
+				normed_dir_relpath = normed_dir_relpath.replace("\\", "/")
+				dir_relpath = dir_relpath.replace("\\", "/")
+			if not self.sftp_compat:
+				normed_dir_relpath = os.path.normcase(normed_dir_relpath)
+
+			# empty directory
+			if dir_relpath != "." and not file_entries and not dir_entries and filter(dir_relpath + display_sep):
+				yield _EmptyDir(
+					normpath = normed_dir_relpath,
+					path     = dir_relpath,
+				)
+				continue
+
+			# prune search tree
+			i = 0
+			while i < len(dir_entries):
+				subdirname = dir_entries[i].name
+				subdir_path = dir / subdirname
+				subdir_relpath = str(_relative_to(subdir_path, root))
+				if not filter(subdir_relpath + display_sep):
+					del dir_entries[i]
+					continue
+				i += 1
+
+			# prune files
+			for entry in file_entries:
+				filename = entry.name
+				file_path = dir / filename
+				file_relpath = str(_relative_to(file_path, root))
+
+				normed_file_relpath = file_relpath
+				if convert_sep:
+					normed_file_relpath = normed_file_relpath.replace("\\", "/")
+					file_relpath = file_relpath.replace("\\", "/")
+				if not self.sftp_compat:
+					normed_file_relpath = os.path.normcase(normed_file_relpath)
+
+				if (filter(file_relpath)):
+					stat  = entry.stat(follow_symlinks=self.follow_symlinks)
+					size  = stat.st_size
+					mtime = stat.st_mtime
+					if size is None or mtime is None:
+						# Ignore files with unknown size or mtime.
+						continue
+					if self.sftp_compat:
+						mtime = float(int(mtime))
+
+					yield _File(
+						normpath = normed_file_relpath,
+						path     = file_relpath,
+						meta     = _Metadata(size=size, mtime=mtime),
+					)
+
+	def _operations(
+			self,
+			*,
+			src_files : Iterator[_Entry],
+			dst_files : Iterator[_Entry],
+		) -> Iterator[Operation]:
+		'''Generator of file system operations to perform for this sync.'''
+
+		display_sep = "/" if self.sftp_compat else os.sep
+
+		src_real_names = {}
+		dst_real_names = {}
+
+		src_meta = {}
+		dst_meta = {}
+
+		src_relpaths = set()
+		dst_relpaths = set()
+
+		src_empty_dirs = set()
+		dst_empty_dirs = set()
+
+		for src_entry in src_files:
+			src_real_names[src_entry.normpath] = src_entry.path
+			if isinstance(src_entry, _File):
+				src_meta[src_entry.normpath] = src_entry.meta
+				src_relpaths.add(src_entry.normpath)
+			elif isinstance(src_entry, _EmptyDir):
+				src_empty_dirs.add(src_entry.normpath)
+
+		for dst_entry in dst_files:
+			dst_real_names[dst_entry.normpath] = dst_entry.path
+			if isinstance(dst_entry, _File):
+				dst_meta[dst_entry.normpath] = dst_entry.meta
+				dst_relpaths.add(dst_entry.normpath)
+			elif isinstance(dst_entry, _EmptyDir):
+				dst_empty_dirs.add(dst_entry.normpath)
+
+		self.logger.debug(f"{len(src_relpaths)=}")
+		self.logger.debug(f"{len(dst_relpaths)=}")
+
+		src_only_relpaths = sorted(src_relpaths.difference(dst_relpaths))
+		dst_only_relpaths = sorted(dst_relpaths.difference(src_relpaths))
+		both_relpaths     = sorted(src_relpaths.intersection(dst_relpaths))
+
+		# Ignore remote files with invalid characters when copying to Windows
+		if os.sep == "nt" and isinstance(self.src, RemotePath):
+			for path in src_only_relpaths.copy():
+				if os.path.isreserved(path) or "\\" in path:
+					self.logger.warning(f"Ignoring incompatible remote file: {path}")
+					src_only_relpaths.remove(path)
+
+		self.logger.debug(f"{len(src_only_relpaths)=}")
+		self.logger.debug(f"{len(dst_only_relpaths)=}")
+		self.logger.debug(f"{len(both_relpaths)=}")
+
+		self.logger.debug(f"{src_only_relpaths[:10]=}")
+		self.logger.debug(f"{dst_only_relpaths[:10]=}")
+		self.logger.debug(f"{both_relpaths[:10]=}")
+
+		# Delete empty directories now in case any new files needs to take their places
+		dst_only_empty_dirs = dst_empty_dirs.difference(src_empty_dirs)
+		for relpath in dst_only_empty_dirs:
+			dst_relpath_real = dst_real_names[relpath]
+			src = self.dst / dst_relpath_real
+			assert not any(src.iterdir())
+			yield DeleteDirOperation(
 				src = src,
 				dst = None,
-				byte_diff = byte_diff,
-				summary = f"- {dst_relpath_real}"
+				byte_diff = 0,
+				summary = f"- {dst_relpath_real}{display_sep}"
 			)
 
-	# Send files to trash
-	elif trash_root is not None:
-		for dst_relpath in dst_only_relpaths:
-			dst_relpath_real = dst_real_names[dst_relpath]
-			src = dst_root / dst_relpath_real
-			dst = trash_root     / dst_relpath_real
-			#byte_diff = -dst_meta[dst_relpath].size
-			byte_diff = 0
-			yield _Operation(
-				category = _Operation.Category.TRASH_FILE,
+		# Rename files
+		if self.rename_threshold is not None:
+			src_only_relpath_from_meta = _reverse_dict({path:src_meta[path] for path in src_only_relpaths})
+			dst_only_relpath_from_meta = _reverse_dict({path:dst_meta[path] for path in dst_only_relpaths})
+
+			for dst_relpath in list(dst_only_relpaths): # dst_only_relpaths is changed inside the loop
+				# Ignore small files
+				if dst_meta[dst_relpath].size < self.rename_threshold:
+					continue
+				try:
+					rename_to = src_only_relpath_from_meta[dst_meta[dst_relpath]]
+					# Ignore if there are multiple candidates
+					if rename_to is None:
+						continue
+
+					rename_from = dst_only_relpath_from_meta[dst_meta[dst_relpath]]
+					# Ignore if there are multiple candidates
+					if rename_from is None:
+						continue
+
+					# Ignore if last 1kb do not match
+					if not self.metadata_only:
+						on_dst = self.dst / rename_from
+						on_src = self.src / rename_to
+						if not _last_bytes(on_src) == _last_bytes(on_dst):
+							continue
+
+					src_only_relpaths.remove(rename_to)
+					dst_only_relpaths.remove(rename_from)
+
+					rename_from = dst_real_names[rename_from]
+					rename_to = src_real_names[rename_to]
+
+					src = self.dst / rename_from
+					dst = self.dst / rename_to
+
+					yield RenameFileOperation(
+						src = src,
+						dst = dst,
+						byte_diff = 0,
+						summary = f"R {rename_from} -> {rename_to}"
+					)
+
+				except KeyError:
+					# dst file not a result of a rename
+					continue
+
+		# Delete files
+		if self.delete_files:
+			for dst_relpath in dst_only_relpaths:
+				dst_relpath_real = dst_real_names[dst_relpath]
+				src = self.dst / dst_relpath_real
+				byte_diff = -dst_meta[dst_relpath].size
+				yield DeleteFileOperation(
+					src = src,
+					dst = None,
+					byte_diff = byte_diff,
+					summary = f"- {dst_relpath_real}"
+				)
+
+		# Send files to trash
+		elif self.trash is not None:
+			for dst_relpath in dst_only_relpaths:
+				dst_relpath_real = dst_real_names[dst_relpath]
+				src = self.dst / dst_relpath_real
+				dst = self.trash / dst_relpath_real
+				#byte_diff = -dst_meta[dst_relpath].size
+				byte_diff = 0
+				yield TrashFileOperation(
+					src = src,
+					dst = dst,
+					byte_diff = byte_diff,
+					summary = f"~ {dst_relpath_real}"
+				)
+
+		# Create files
+		for src_relpath in src_only_relpaths:
+			src_relpath_real = src_real_names[src_relpath]
+			src = self.src / src_relpath_real
+			dst = self.dst / src_relpath_real
+			byte_diff = src_meta[src_relpath].size
+			yield CreateFileOperation(
 				src = src,
 				dst = dst,
 				byte_diff = byte_diff,
-				summary = f"~ {dst_relpath_real}"
+				summary = f"+ {src_relpath_real}"
 			)
 
-	# Create files
-	for src_relpath in src_only_relpaths:
-		src_relpath_real = src_real_names[src_relpath]
-		src = src_root / src_relpath_real
-		dst = dst_root / src_relpath_real
-		byte_diff = src_meta[src_relpath].size
-		yield _Operation(
-			category = _Operation.Category.CREATE_FILE,
-			src = src,
-			dst = dst,
-			byte_diff = byte_diff,
-			summary = f"+ {src_relpath_real}"
-		)
-
-	# Update files that have newer mtimes
-	for relpath in both_relpaths:
-		src_relpath_real = src_real_names[relpath]
-		dst_relpath_real = dst_real_names[relpath]
-		src = src_root / src_relpath_real
-		dst = dst_root / dst_relpath_real
-		byte_diff = src_meta[relpath].size - dst_meta[relpath].size
-		src_time = src_meta[relpath].mtime
-		dst_time = dst_meta[relpath].mtime
-		if src_time > dst_time:
-			yield _Operation(
-				category = _Operation.Category.UPDATE_FILE,
-				src = src,
-				dst = dst,
-				byte_diff = byte_diff,
-				summary = f"U {dst_relpath_real}"
-			)
-		elif src_time < dst_time:
-			if force_update:
-				yield _Operation(
-					category = _Operation.Category.UPDATE_FILE,
+		# Update files that have newer mtimes
+		for relpath in both_relpaths:
+			src_relpath_real = src_real_names[relpath]
+			dst_relpath_real = dst_real_names[relpath]
+			src = self.src / src_relpath_real
+			dst = self.dst / dst_relpath_real
+			byte_diff = src_meta[relpath].size - dst_meta[relpath].size
+			src_time = src_meta[relpath].mtime
+			dst_time = dst_meta[relpath].mtime
+			if src_time > dst_time:
+				yield UpdateFileOperation(
 					src = src,
 					dst = dst,
 					byte_diff = byte_diff,
 					summary = f"U {dst_relpath_real}"
 				)
+			elif src_time < dst_time:
+				if self.force_update:
+					yield UpdateFileOperation(
+						src = src,
+						dst = dst,
+						byte_diff = byte_diff,
+						summary = f"U {dst_relpath_real}"
+					)
+				else:
+					self.logger.warning(f"'src' file is older than 'dst' file, skipping update: {relpath}")
+
+		# Create empty directories
+		src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
+		for relpath in src_only_empty_dirs:
+			src_relpath_real = src_real_names[relpath]
+			dst = self.dst / src_relpath_real
+			yield CreateDirOperation(
+				src = None,
+				dst = dst,
+				byte_diff = 0,
+				summary = f"+ {src_relpath_real}{display_sep}"
+			)
+
+	def run(self) -> Results:
+		if self._state != Sync._SyncState.READY:
+			raise StateError("Sync object state is not READY.")
+
+		try:
+			self.logger.debug(f"Starting backup: {self.src=} {self.dst=} {self.filter=} {self.trash=} {self.delete_files=} {self.force_update=} {self.metadata_only=} {self.rename_threshold=} {self.ignore_symlinks=} {self.follow_symlinks=} {self.dry_run=} {self.log_file=} {self.log_level=} {self.print_level=} {self.sftp_compat=}".replace("self.", ""))
+			self.logger.debug("")
+
+			width = max(len(str(self.src)), len(str(self.dst)), 7) + 3
+			self.logger.info("   " + str(self.src))
+			self.logger.info("-> " + str(self.dst))
+			self.logger.info("-" * width)
+
+			src_files = self._scandir(self.src)
+			if self.dst.exists():
+				dst_files = self._scandir(self.dst)
 			else:
-				logger.warning(f"'src' file is older than 'dst' file, skipping update: {relpath}")
+				dst_files = iter([])
 
-	# Create empty directories
-	src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
-	for relpath in src_only_empty_dirs:
-		src_relpath_real = src_real_names[relpath]
-		dst = dst_root / src_relpath_real
-		yield _Operation(
-			category = _Operation.Category.CREATE_DIR,
-			src = None,
-			dst = dst,
-			byte_diff = 0,
-			summary = f"+ {src_relpath_real}{display_sep}"
-		)
+			for op in self._operations(
+				src_files = src_files,
+				dst_files = dst_files,
+			):
+				self.logger.info(op.summary)
 
-def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
+				if not self.dry_run:
+					try:
+						op.perform(self)
+						self.results.tally_success(op)
+					except OSError as e:
+						msg = "  " + _error_summary(e)
+						self.logger.error(msg)
+						self.results.tally_error(op, msg)
+
+			self.results.status = Results.Status.COMPLETED
+
+		except KeyboardInterrupt as e:
+			self.results.status = Results.Status.INTERRUPTED_BY_USER
+			raise e
+		except ConnectionError as e:
+			self.logger.info("")
+			self.logger.critical(f"Connection Error: {e}", exc_info=False)
+			self.results.status = Results.Status.CONNECTION_ERROR
+		except Exception as e:
+			self.logger.info("")
+			self.logger.critical("An unexpected error occurred.", exc_info=True)
+			self.results.status = Results.Status.INTERRUPTED_BY_ERROR
+		finally:
+			self.logger.info("-" * width)
+			for line in self.results.summary():
+				self.logger.info(line)
+
+			if self.results.err_count:
+				self.logger.info("")
+				self.logger.info(f"There were {self.results.err_count} errors.")
+				if self.results.err_count <= 10:
+					self.logger.info("Errors are reprinted below for convenience.")
+					for error in self.results.errors:
+						self.logger.info(error)
+
+			if self.log_file:
+				self.logger.info("")
+				self.logger.info(f"Log file: {self.log_file}")
+				self.close_file_handler()
+
+			self.logger.info("")
+			self._state = Sync._SyncState.TERMINATED
+
+		return self.results
+
+def _copy(src:PathType, dst:PathType, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
 	'''Copy file from `src` to `dst`, keeping timestamp metadata. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
 	if dst.exists():
@@ -786,7 +1079,7 @@ def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, fol
 
 		try:
 			# Replace the dst file with the tmp file
-			dst_tmp.replace(dst)
+			_replace(dst_tmp, dst)
 		except PermissionError as e:
 			# Remove read-only flag and try again
 			make_readonly = False
@@ -794,21 +1087,17 @@ def _copy(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = True, fol
 				dst_stat = dst.stat()
 				if dst_stat.st_mode is None or not (dst_stat.st_mode & stat.S_IREAD):
 					raise e
-				dst.chmod(stat.S_IWRITE)
+				dst.chmod(stat.S_IWRITE, follow_symlinks=False)
 				make_readonly = True
-				dst_tmp.replace(dst)
+				_replace(dst_tmp, dst)
 			finally:
 				if make_readonly:
-					dst.chmod(stat.S_IREAD)
+					dst.chmod(stat.S_IREAD, follow_symlinks=False)
 	finally:
 		dst_tmp.unlink(missing_ok=True)
 
-def _move(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = False) -> None:
-	'''
-	Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.
-
-	If `delete_empty_dirs_under` is supplied, then any empty directories created during this file move (and under this root directory) will be deleted.
-	'''
+def _move(src:PathType, dst:PathType, *, exist_ok:bool = False) -> None:
+	'''Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
 	if dst.exists():
 		if not exist_ok:
@@ -828,9 +1117,23 @@ def _move(src:Path|RemotePath, dst:Path|RemotePath, *, exist_ok:bool = False) ->
 	# move the file
 	dir = dst.parent
 	dir.mkdir(exist_ok=True, parents=True)
-	src.replace(dst)
+	_replace(src, dst)
 
-def _delete_empty_dirs(dir:Path|RemotePath, dir_stop:Path|RemotePath) -> None:
+# this is just needed to stop mypy from complaining
+def _replace(src:PathType, dst:PathType) -> None:
+	if isinstance(src, Path):
+		src.replace(cast(Path, dst))
+	else:
+		src.replace(cast(RemotePath, dst))
+
+# this is just needed to stop mypy from complaining
+def _relative_to(path:PathType, root:PathType) -> PathType:
+	if isinstance(path, Path):
+		return path.relative_to(cast(Path, root))
+	else:
+		return path.relative_to(cast(RemotePath, root))
+
+def _delete_empty_dirs(dir:PathType, dir_stop:PathType) -> Iterator[PathType]:
 	'''Iteratively delete empty directories, starting with `dir` and moving up to (but not including) `dir_stop`.'''
 
 	if not dir.is_dir():
@@ -844,14 +1147,14 @@ def _delete_empty_dirs(dir:Path|RemotePath, dir_stop:Path|RemotePath) -> None:
 	else:
 		raise ValueError(f"'dir' and 'dir_stop' must be the same type.")
 	#if any(dir.iterdir()):
-	#	raise ValueError(f"Dir is not empty: {dir}")
+	#	raise OSError(f"Dir is not empty: {dir}")
 	try:
 		while dir != dir_stop and not any(dir.iterdir()):
-			logger.debug(f"deleting empty dir: {dir}")
+			yield dir # for logging
 			dir.rmdir()
 			dir = dir.parent
 	except OSError as e:
-		logger.warning(str(e))
+		raise DirDeleteError(str(e)) from e
 
 def _last_bytes(file_path:Path, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''

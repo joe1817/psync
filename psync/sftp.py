@@ -4,6 +4,7 @@
 import os
 import sys
 import stat
+import time
 import tempfile
 import posixpath
 import socket
@@ -159,10 +160,17 @@ class RemotePath:
 				os.symlink(target, str(dst), target_is_directory=src.is_dir())
 			else:
 				raise OSError(f"Broken symlink: {src}")
+
 		if st.st_atime is not None and st.st_mtime is not None:
-			os.utime(dst, (st.st_atime, st.st_mtime))
+			if follow_symlinks:
+				os.utime(str(dst), (st.st_atime, st.st_mtime))
+			else:
+				try:
+					os.utime(str(dst), (st.st_atime, st.st_mtime), follow_symlinks=False)
+				except NotImplementedError:
+					raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 		else:
-			raise MetadataUpdateError(f"Could not update time metadata: {src}")
+			raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 
 	@classmethod
 	def _put_file(cls, src:Path, dst:"RemotePath", *, follow_symlinks:bool) -> None:
@@ -178,10 +186,22 @@ class RemotePath:
 				connection.symlink(target, str(dst))
 			else:
 				raise OSError(f"Broken symlink: {src}")
+
 		if st.st_atime is not None and st.st_mtime is not None:
-			connection.utime(str(dst), (st.st_atime, st.st_mtime))
+			if follow_symlinks:
+				connection.utime(str(dst), (st.st_atime, st.st_mtime))
+			else:
+				mtime_epoch = int(st.st_mtime)
+				new_mtime = time.strftime("%Y%m%d%H%M.%S", time.localtime(mtime_epoch))
+				# touch -h changes the link times, not the target
+				command = f"touch -h -m -t {new_mtime} {str(dst)}"
+				ssh = RemotePath.ssh_connections[dst.conn_details]
+				stdin, stdout, stderr = ssh.exec_command(command)
+				error = stderr.read().decode().strip()
+				if error:
+					raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 		else:
-			raise MetadataUpdateError(f"Could not update time metadata: {src}")
+			raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 
 	connection:paramiko.sftp_client.SFTPClient
 
@@ -297,7 +317,7 @@ class RemotePath:
 	def iterdir(self) -> Iterator["RemotePath"]:
 		'''Returns an iterator of `RemotePath` objects pointing to the contents of the remote directory.'''
 
-		for st in RemotePath.sftp_connections[self.conn_details].listdir_iter(str(self)):
+		for st in RemotePath.sftp_connections[self.conn_details].listdir_iter(str(self), read_aheads=1):
 			entry = self / st.filename
 			entry._lstat = st
 			yield entry
@@ -382,7 +402,11 @@ class RemotePath:
 	def unlink(self, missing_ok:bool = True) -> None:
 		'''Delete the remote file.'''
 
-		RemotePath.sftp_connections[self.conn_details].remove(str(self))
+		try:
+			RemotePath.sftp_connections[self.conn_details].remove(str(self))
+		except FileNotFoundError as e:
+			if not missing_ok:
+				raise e
 
 	def open(self, mode = "r", buffering = -1, encoding = None, errors = None, newline = None):
 		'''Open the remote file.'''
@@ -436,6 +460,9 @@ class RemotePath:
 		if self.conn_details != target.conn_details:
 			return False
 		return PurePosixPath(self).is_relative_to(target)
+
+	def __repr__(self):
+		return f"{self.conn_details}/{str(self)}"
 
 class _RemotePathScanner:
 	def __init__(self, path:RemotePath):

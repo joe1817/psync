@@ -18,11 +18,9 @@ from collections import Counter
 from .filter import Filter, PathFilter
 from .helpers import _reverse_dict, _human_readable_size, _error_summary
 from .sftp import RemotePath, _RemotePathScanner
+from .types import PathType, PathLikeType
 from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _LogFileFormatter
-
-PathLikeType = str | os.PathLike[str]
-PathType = Path | RemotePath
 
 @dataclass(frozen=True)
 class _Metadata:
@@ -337,7 +335,7 @@ class Sync:
 
 		self._state = Sync._SyncState.INVALID
 
-		if not isinstance(val, str|os.PathLike):
+		if not isinstance(val, PathLikeType):
 			raise TypeError(f"Bad type for property 'src' (expected {PathLikeType}): {val}")
 
 		src: PathType
@@ -374,7 +372,7 @@ class Sync:
 
 		self._state = Sync._SyncState.INVALID
 
-		if not isinstance(val, str|os.PathLike):
+		if not isinstance(val, PathLikeType):
 			raise TypeError(f"Bad type for property 'dst' (expected {PathLikeType}): {val}")
 
 		dst: PathType
@@ -446,7 +444,7 @@ class Sync:
 			self._trash = None
 			return
 
-		if not isinstance(val, str|os.PathLike):
+		if not isinstance(val, PathLikeType):
 			raise TypeError(f"Bad type for property 'trash' (expected {PathLikeType}): {val}")
 		if self.delete_files:
 			raise RuntimeError("Mutually exclusive properties: 'trash' and 'delete_files'")
@@ -596,8 +594,8 @@ class Sync:
 			self.handler_file = None
 			return
 
-		if not isinstance(val, str|os.PathLike):
-			raise TypeError(f"Bad type for property 'log_file' (expected {str|os.PathLike}): {val}")
+		if not isinstance(val, PathLikeType):
+			raise TypeError(f"Bad type for property 'log_file' (expected {PathLikeType}): {val}")
 
 		log_file: PathType
 		tmp_log_file: PathType

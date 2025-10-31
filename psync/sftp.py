@@ -397,21 +397,11 @@ class RemotePath:
 			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
 		if self.conn_details != target.conn_details:
 			raise ValueError("Netloc mismatch.")
-		RemotePath.sftp_connections[self.conn_details].rename(str(self), str(target))
+		RemotePath.sftp_connections[self.conn_details].posix_rename(str(self), str(target)) # atomic
 		return target
 
 	def replace(self, target:"RemotePath") -> "RemotePath":
-		'''Replaces this file/directory over the given `target`, and return a new `Path` instance pointing to `target`. This is NOT an atomic operation.'''
-
-		if not isinstance(target, RemotePath):
-			#target = type(self)(str(target), self.conn_details)
-			raise TypeError(f"Expected 'target' to be a RemotePath, but received type: {type(target).__name__}")
-		if self.conn_details != target.conn_details:
-			raise ValueError("Netloc mismatch.")
-		try:
-			RemotePath.sftp_connections[self.conn_details].remove(str(target))
-		except FileNotFoundError:
-			pass
+		'''Alias for `rename()`.'''
 		return self.rename(target)
 
 	def samefile(self, target:"RemotePath") -> bool:

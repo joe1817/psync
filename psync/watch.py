@@ -30,9 +30,9 @@ class _LocalWatcher(FileSystemEventHandler):
 		self.base_filter = sync.filter
 
 	def watch(self):
-		logger.info(f"  Watching: {self.sync.src} -> {self.sync.dst}")
-		logger.info( "  Press CTRL-C to quit.")
-		logger.info( "  ---------------------")
+		logger.info(f"Watching: {self.sync.src} -> {self.sync.dst}")
+		logger.info( "Press CTRL-C to quit.")
+		logger.info( "---------------------")
 		observer = Observer()
 		if isinstance(self.sync.src, Path):
 			observer.schedule(self, str(self.sync.src), recursive=True)

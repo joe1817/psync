@@ -44,17 +44,3 @@ def _human_readable_size(n:int) -> str:
 		n //= 1024
 		i += 1
 	return f"{sign}{round(n)} {units[i]}"
-
-# TODO remove this?
-def _error_summary(e):
-	'''Get a one-line summary of an Error.'''
-
-	if isinstance(e, OSError):
-		error_type = type(e).__name__
-		affected_file = getattr(e, "filename", "N/A")
-		msg = f"{error_type}: {affected_file}"
-	else:
-		error_type = type(e).__name__
-		error_message = getattr(e, "strerror", "Unknown error")
-		msg = f"{error_type}: {error_message}"
-	return msg

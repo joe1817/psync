@@ -16,11 +16,11 @@ from typing import Any, Literal, Iterator, Counter as CounterType, cast
 from collections import Counter
 
 from .filter import Filter, PathFilter
-from .helpers import _reverse_dict, _human_readable_size, _error_summary
+from .helpers import _reverse_dict, _human_readable_size
 from .sftp import RemotePath, _RemotePathScanner
 from .types import PathType, PathLikeType
 from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
-from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _LogFileFormatter
+from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
 @dataclass(frozen=True)
 class _Metadata:
@@ -103,7 +103,7 @@ class DeleteFileOperation(Operation):
 class TrashFileOperation(Operation):
 	src  : PathType
 	dst  : PathType
-	name : str = "»Trash"
+	name : str = "Trash"
 
 	def perform(self, sync:"Sync"):
 		_move(self.src, self.dst)
@@ -125,7 +125,7 @@ class DeleteDirOperation(Operation):
 		try:
 			self.src.rmdir()
 		except OSError as e:
-			raise DirDeleteError(str(e)) from e
+			raise DirDeleteError(_exc_summary(e)) from e
 
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
@@ -138,41 +138,57 @@ class Results:
 		INTERRUPTED_BY_ERROR = 3
 
 	def __init__(self, sync:"Sync"):
-		self.sync      : "Sync" = sync # needed to reference trash, log, and dry_run
-		self.status    : Results.Status = Results.Status.UNKNOWN
-		self.errors    : list[str] = []
-		self.counts    : CounterType[str] = Counter()
-		self.byte_diff : int = 0
+		self.sync           : "Sync" = sync # needed to reference trash, log, and dry_run
+		self.status         : Results.Status = Results.Status.UNKNOWN
+		self.error          : BaseException|None = None # any error that prevented or halted sync operation
+		self.sync_errors    : list[tuple[Operation, Exception]] = []
+		self.success_counts : CounterType[str] = Counter()
+		self.failure_counts : CounterType[str] = Counter()
+		self.byte_diff      : int = 0
 
 	def tally_success(self, op:Operation):
-		self.counts[f"{op.name} Success"] += 1
+		self.success_counts[op.name] += 1
 		self.byte_diff += op.byte_diff
 
-	def tally_error(self, op:Operation, err_msg:str):
-		self.counts[f"{op.name} Error"] += 1
-		self.errors.append(err_msg)
+	def tally_failure(self, op:Operation, e:Exception):
+		self.failure_counts[op.name] += 1
+		self.sync_errors.append((op, e))
 
 	@property
-	def err_count(self) -> int:
-		return sum(v for k,v in self.counts.items() if k.endswith(" Error"))
+	def failure_count(self) -> int:
+		return sum(self.failure_counts.values())
+
+	@property
+	def success_count(self) -> int:
+		return sum(self.success_counts.values())
+
+	@property
+	def total_count(self) -> int:
+		return self.success_count + self.failure_count
 
 	def __getitem__(self, key):
 		if isinstance(key, type) and issubclass(key, Operation):
-			return (self.counts[key.name+" Success"], self.counts[key.name+" Error"])
+			return (self.success_counts[key.name], self.failure_counts[key.name])
 		else:
 			return self.counts[key]
 
 	def summary(self):
 		status = self.status.name.replace("_", " ").title()
+		lines = []
 		if self.sync.dry_run:
-			yield f"       Status: {status} (Dry Run)"
+			lines.append(f"Status: {status} (Dry Run)")
 		else:
-			yield f"       Status: {status}"
-			for key in ["Create", "Update", "Rename", "Delete", "»Trash"]:
-				key_sucess = f"{key} Sucess"
-				key_error  = f"{key} Error"
-				yield f"{key_sucess}: {self[key_sucess]}" + (f" | Failed: {self[key_error]}" if self[key_error] else "")
-			yield f"   Net Change: {_human_readable_size(self.byte_diff)}"
+			lines.append(f"Status: {status}")
+			# keys = self.success_counts.keys()|self.failure_counts.keys()
+			keys = ["Create", "Update", "Rename", "Delete", "Trash"]
+			for key in keys:
+				lines.append(f"{key} Success: {self.success_counts[key]}" + (f" | Failed: {self.failure_counts[key]}" if self.failure_counts[key] else ""))
+			lines.append(f"Net Change: {_human_readable_size(self.byte_diff)}")
+		if self.sync.log_file:
+			lines.append(f"Log File: {self.sync.log_file}")
+		key_length = max(line.find(":") for line in lines)
+		for line in lines:
+			yield f"{line:>{len(line) + key_length - line.find(":")}}"
 
 class Sync:
 	'''
@@ -183,9 +199,9 @@ class Sync:
 	Files can be optionally "recycled" from `dst` if they are not present in `src` (they will be moved into `trash`, preserving directory structure) or they can be deleted.
 
 	Example Console Output
-		   path/to/src
-		-> path/to/dst
-		--------------
+		     path/to/src
+		  -> path/to/dst
+		  --------------
 		- empty-dir-in-dst/
 		R old-name.txt -> new-name.txt
 		- not-in-src-and-getting-deleted.txt
@@ -193,18 +209,15 @@ class Sync:
 		+ not-in-dst.txt
 		U updated.txt
 		+ empty-dir-in-src/
-
-		Summary
-		-------
-		Status: Completed
-		Create Success: 1
-		Update Success: 1
-		Rename Success: 1
-		Delete Success: 1
-		»Trash Success: 1
-		Net Change: 0 bytes
-
-		Log file: path/to/log/psync_20251015_201523.log
+		  -------
+		          Status: Completed
+		  Create Success: 1
+		  Update Success: 1
+		  Rename Success: 1
+		  Delete Success: 1
+		   Trash Success: 1
+		      Net Change: 0 bytes
+		        Log File: path/to/log/psync_20251015_201523.log
 	'''
 
 	class _SyncState(Enum):
@@ -304,6 +317,8 @@ class Sync:
 		self.handler_stdout.addFilter(_DebugInfoFilter())
 		self.handler_stdout.setLevel(logging.INFO)
 		self.handler_stderr.setLevel(logging.WARNING)
+		self.handler_stdout.setFormatter(_ConsoleFormatter())
+		self.handler_stderr.setFormatter(_ConsoleFormatter())
 		self.filter_tag = _TagFilter()
 		self.handler_stdout.addFilter(self.filter_tag)
 		self.logger.addHandler(self.handler_stdout)
@@ -733,7 +748,7 @@ class Sync:
 							else:
 								is_dir = entry.is_dir(follow_symlinks=False)
 						except OSError as e:
-							self.logger.warning(e)
+							self.logger.warning(_exc_summary(e))
 							continue
 
 						if is_dir:
@@ -742,7 +757,7 @@ class Sync:
 							nondirs.append(entry)
 			except OSError as e:
 				# top does not exist or user has no read access
-				self.logger.warning(e)
+				self.logger.warning(_exc_summary(e))
 				continue
 
 			#dirs.sort(key=lambda x: x.name)
@@ -1015,7 +1030,7 @@ class Sync:
 					src = src,
 					dst = dst,
 					byte_diff = byte_diff,
-					summary = f"~ {dst_relpath_real}"
+					summary = f"T {dst_relpath_real}"
 				)
 				yield from _automatic_dir_delete_ops(dst_relpath)
 
@@ -1079,8 +1094,9 @@ class Sync:
 			raise StateError("Sync object state is not READY.")
 
 		try:
-			HEADER = _RecordTag.HEADER.dict()
-			FOOTER = _RecordTag.FOOTER.dict()
+			HEADER  = _RecordTag.HEADER.dict()
+			FOOTER  = _RecordTag.FOOTER.dict()
+			SYNC_OP = _RecordTag.SYNC_OP.dict()
 
 			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
 			self.logger.debug("")
@@ -1100,46 +1116,45 @@ class Sync:
 				src_files = src_files,
 				dst_files = dst_files,
 			):
-				self.logger.info(op.summary)
+				self.logger.info(op.summary, extra=SYNC_OP)
 
 				if not self.dry_run:
 					try:
 						op.perform(self)
 						self.results.tally_success(op)
 					except OSError as e:
-						msg = "  " + _error_summary(e)
-						self.logger.error(msg)
-						self.results.tally_error(op, msg)
+						self.logger.error(_exc_summary(e))
+						self.results.tally_failure(op, e)
 
 			self.results.status = Results.Status.COMPLETED
-
 		except KeyboardInterrupt as e:
 			self.results.status = Results.Status.INTERRUPTED_BY_USER
+			self.results.error = e
 			raise e
 		except ConnectionError as e:
 			self.logger.info("")
 			self.logger.critical(f"Connection Error: {e}", exc_info=False)
 			self.results.status = Results.Status.CONNECTION_ERROR
+			self.results.error = e
 		except Exception as e:
 			self.logger.info("")
 			self.logger.critical("An unexpected error occurred.", exc_info=True)
 			self.results.status = Results.Status.INTERRUPTED_BY_ERROR
+			self.results.error = e
 		finally:
 			self.logger.info("-" * width, extra=FOOTER)
 			for line in self.results.summary():
 				self.logger.info(line, extra=FOOTER)
 
-			if self.results.err_count:
+			if self.results.failure_count:
 				self.logger.info("", extra=FOOTER)
-				self.logger.info(f"There were {self.results.err_count} errors.", extra=FOOTER)
-				if self.results.err_count <= 10:
+				self.logger.info(f"There were {self.results.failure_count} errors.", extra=FOOTER)
+				if self.results.failure_count <= 10 and self.results.total_count >= 50:
 					self.logger.info("Errors are reprinted below for convenience.", extra=FOOTER)
-					for error in self.results.errors:
-						self.logger.info(error, extra=FOOTER)
+					for op, exc in self.results.sync_errors:
+						self.logger.info(_exc_summary(exc), extra=FOOTER)
 
 			if self.log_file:
-				self.logger.info("", extra=FOOTER)
-				self.logger.info(f"Log file: {self.log_file}", extra=FOOTER)
 				self.close_file_handler()
 
 			self.logger.info("", extra=FOOTER)

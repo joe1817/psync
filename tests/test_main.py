@@ -12,5 +12,5 @@ class TestArgParser(unittest.TestCase):
 
 	def test_parse(self):
 		parsed = main._ArgParser.parse(["src", "dst", "-f", "+ \"a b.txt\""])
-		self.assertTrue(parsed.filter.filter("a b.txt"))
-		self.assertFalse(parsed.filter.filter("b.txt"))
+		self.assertTrue(parsed.filter.filter("", "a b.txt"))
+		self.assertFalse(parsed.filter.filter("", "b.txt"))

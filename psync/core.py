@@ -787,7 +787,7 @@ class Sync:
 				normed_dir_relpath = os.path.normcase(normed_dir_relpath)
 
 			# empty directory
-			if dir_relpath != "." and filter(dir_relpath + display_sep):
+			if dir_relpath != "." and filter(root, dir_relpath + display_sep):
 				if file_entries or dir_entries:
 					yield _NonEmptyDir(
 						normpath = normed_dir_relpath,
@@ -806,7 +806,7 @@ class Sync:
 				subdirname = dir_entries[i].name
 				subdir_path = dir / subdirname
 				subdir_relpath = str(_relative_to(subdir_path, root))
-				if not filter(subdir_relpath + display_sep):
+				if not filter(root, subdir_relpath + display_sep):
 					del dir_entries[i]
 					continue
 				i += 1
@@ -824,7 +824,7 @@ class Sync:
 				if not self.sftp_compat:
 					normed_file_relpath = os.path.normcase(normed_file_relpath)
 
-				if (filter(file_relpath)):
+				if filter(root, file_relpath):
 					stat  = entry.stat(follow_symlinks=self.follow_symlinks)
 					size  = stat.st_size
 					mtime = stat.st_mtime

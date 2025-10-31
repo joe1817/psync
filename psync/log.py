@@ -2,9 +2,24 @@ import sys
 import logging
 from enum import Enum
 
+def _exc_summary(e) -> str:
+	'''Get a one-line summary of an `Exception`.'''
+
+	error_type = type(e).__name__
+	affected_file = getattr(e, "filename", None)
+	error_message = getattr(e, "strerror", None)
+	if isinstance(e, OSError) and affected_file:
+		msg = f"{error_type}: {affected_file}"
+	elif error_message:
+		msg = f"{error_type}: {error_message}"
+	else:
+		msg = error_type
+	return msg
+
 class _RecordTag(Enum):
 	HEADER = 1
 	FOOTER = 2
+	SYNC_OP = 3
 
 	def dict(self):
 		return {self.name: True}
@@ -33,6 +48,22 @@ class _TagFilter(logging.Filter):
 			return False
 		return not any(self.hidden[k] and bool(getattr(record, k.name, False)) for k in self.hidden)
 
+class _ConsoleFormatter(logging.Formatter):
+	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+	BASE_FORMAT = "%(message)s"
+
+	def __init__(self, fmt=BASE_FORMAT, datefmt=None, style="%"):
+		super().__init__(fmt, datefmt, style)
+
+	def format(self, record):
+		msg = super().format(record)
+		extra_indent = "" if getattr(record, _RecordTag.SYNC_OP.name, False) else "  "
+		if record.levelno == logging.DEBUG:
+			msg = f"  {extra_indent}{msg.replace("\n", f"\n  {extra_indent}").rstrip(" ")}"
+		else:
+			msg = f"{extra_indent}{msg.replace("\n", f"\n{extra_indent}").rstrip(" ")}"
+		return msg
+
 class _LogFileFormatter(logging.Formatter):
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 	BASE_FORMAT = "%(message)s"
@@ -41,19 +72,18 @@ class _LogFileFormatter(logging.Formatter):
 		super().__init__(fmt, datefmt, style)
 
 	def format(self, record):
-		original_message = record.msg
+		msg = super().format(record)
 		if record.levelno == logging.DEBUG:
-			record.msg = f"\t{original_message}"
+			msg = f"  {msg.replace("\n", "\n  ").rstrip(" ")}"
 		elif record.levelno == logging.INFO:
 			pass
 		elif record.levelno == logging.WARNING:
-			record.msg = f"WARN: {original_message}"
+			msg = f"WARNING: {msg}"
 		elif record.levelno == logging.ERROR:
-			record.msg = f"ERROR: {original_message}"
+			msg = f"ERROR: {msg}"
 		elif record.levelno == logging.CRITICAL:
-			record.msg = f"\n*** {original_message} ***\n"
-		formatted_message = super().format(record)
-		return formatted_message
+			msg = f"*** CRITICAL ***: {msg}"
+		return msg
 
 logger = logging.getLogger("psync")
 logger.setLevel(logging.INFO)

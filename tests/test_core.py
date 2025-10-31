@@ -362,7 +362,7 @@ class TestSync(unittest.TestCase):
 				dst_files = sync._scandir(root = c_root),
 			))
 			expected = [
-				f"~ {os.path.join('aa', '1.txt')}",
+				f"T {os.path.join('aa', '1.txt')}",
 				f"+ {os.path.join('a', '1.txt')}"
 			]
 			self.assertEqual(actual, expected)

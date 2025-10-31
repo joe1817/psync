@@ -4,7 +4,6 @@
 import sys
 import logging
 import argparse
-#import traceback
 
 from .core import Sync, Results
 from .filter import PathFilter
@@ -87,60 +86,61 @@ class _ArgParser:
 
 		return parsed_args
 
-def _sync_cmd(args:list[str]) -> None:
-	'''Run `Sync.run()` with command line arguments.'''
+def main(args:list[str]) -> None:
+	'''Create a `Sync` with command line arguments and run it.'''
+
 	try:
 		parsed_args = _ArgParser.parse(args)
-	except SystemExit:
-		# message logged by argparse
-		return
 
-	if parsed_args.debug:
-		logger.setLevel(logging.DEBUG)
+		if parsed_args.debug:
+			logger.setLevel(logging.DEBUG)
 
-	try:
-		sync = Sync(
-			parsed_args.src,
-			parsed_args.dst,
+		try:
+			sync = Sync(
+				parsed_args.src,
+				parsed_args.dst,
 
-			filter           = parsed_args.filter,
-			ignore_symlinks  = parsed_args.ignore_symlinks,
-			follow_symlinks  = parsed_args.follow_symlinks,
+				filter           = parsed_args.filter,
+				ignore_symlinks  = parsed_args.ignore_symlinks,
+				follow_symlinks  = parsed_args.follow_symlinks,
 
-			trash            = parsed_args.trash,
-			delete_files     = parsed_args.delete_files,
-			force_update     = parsed_args.force_update,
-			metadata_only    = parsed_args.metadata_only,
-			rename_threshold = parsed_args.rename_threshold,
+				trash            = parsed_args.trash,
+				delete_files     = parsed_args.delete_files,
+				force_update     = parsed_args.force_update,
+				metadata_only    = parsed_args.metadata_only,
+				rename_threshold = parsed_args.rename_threshold,
 
-			dry_run          = parsed_args.dry_run,
-			log_file         = parsed_args.log,
-			log_level        = parsed_args.log_level,
-			print_level      = parsed_args.print_level,
-			no_header        = parsed_args.no_header or parsed_args.no_header_or_footer,
-			no_footer        = parsed_args.no_footer or parsed_args.no_header_or_footer,
-		)
-	except (TypeError, ValueError) as e:
-		logger.error(str(e), exc_info=False) # assume input error, don't print stack trace
-		return
-	except ConnectionError as e:
-		logger.error(str(e), exc_info=False)
-		return
+				dry_run          = parsed_args.dry_run,
+				log_file         = parsed_args.log,
+				log_level        = parsed_args.log_level,
+				print_level      = parsed_args.print_level,
+				no_header        = parsed_args.no_header or parsed_args.no_header_or_footer,
+				no_footer        = parsed_args.no_footer or parsed_args.no_header_or_footer,
+			)
+		except (TypeError, ValueError) as e:
+			logger.critical(e)
+			sys.exit(1)
 
-	if parsed_args.watch:
-		watch(sync)
-	else:
-		sync.run()
+		if parsed_args.watch:
+			watch(sync)
+		else:
+			sync.run()
 
-if __name__ == "__main__":
-	try:
-		_sync_cmd(sys.argv[1:])
-	except ImportError as e:
-		logger.critical(str(e))
+		sys.exit(0)
+
 	except KeyboardInterrupt:
-		pass
-	#except Exception:
-	#	print()
-	#	traceback.print_exc()
+		sys.exit(1)
+	except ImportError as e:
+		logger.critical(e)
+		sys.exit(1)
+	except ConnectionError as e:
+		logger.critical(e)
+		sys.exit(1)
+	except Exception as e:
+		logger.critical("An unexpected error occurred.", exc_info=True)
+		sys.exit(1)
 	finally:
 		RemotePath.close_connections()
+
+if __name__ == "__main__":
+	main(sys.argv[1:])

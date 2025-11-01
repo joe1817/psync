@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from .core import Sync
-from .filter import PathFilter
+from .filter import PathFilter, AllFilter
 from .log import logger
 from .errors import UnsupportedOperationError
 
@@ -27,6 +27,7 @@ class _LocalWatcher(FileSystemEventHandler):
 		if "Observer" not in globals():
 			raise ImportError("Watchdog package is needed to watch for filesystem changes. Install it with: pip install watchdog")
 		self.sync = sync
+		self.base_filter = sync.filter
 
 	def watch(self):
 		logger.info(f"  Watching: {self.sync.src} -> {self.sync.dst}")
@@ -50,10 +51,18 @@ class _LocalWatcher(FileSystemEventHandler):
 		self.sync.reset()
 		relpath = os.path.relpath(event.src_path, self.sync.src)
 		if isinstance(event, FileCreatedEvent):
-			self.sync.filter = PathFilter(is_glob=False).allow(relpath)
+			new_filter = AllFilter(
+				self.base_filter,
+				PathFilter(is_glob=False).allow(relpath),
+			)
+			self.sync.filter = new_filter
 			self.sync.run()
 		else:
-			self.sync.filter = PathFilter().allow(relpath, is_glob=False, is_dir=True).allow("./**/*", is_glob=True)
+			new_filter = AllFilter(
+				self.base_filter,
+				PathFilter().allow(relpath, is_glob=False, is_dir=True).allow("./**/*", is_glob=True),
+			)
+			self.sync.filter = new_filter
 			self.sync.run()
 
 	def on_deleted(self, event):
@@ -65,11 +74,19 @@ class _LocalWatcher(FileSystemEventHandler):
 		dst_path = os.path.join(self.sync.dst, relpath)
 		if os.path.isfile(dst_path):
 			if self.sync.delete_files or self.sync.trash:
-				self.sync.filter = PathFilter(is_glob=False).allow(relpath)
+				new_filter = AllFilter(
+					self.base_filter,
+					PathFilter(is_glob=False).allow(relpath),
+				)
+				self.sync.filter = new_filter
 				self.sync.run()
 		elif os.path.isdir(dst_path):
 			if self.sync.delete_files or self.sync.trash:
-				self.sync.filter = PathFilter().allow(relpath, is_glob=False, is_dir=True).allow("./**/*", is_glob=True)
+				new_filter = AllFilter(
+					self.base_filter,
+					PathFilter().allow(relpath, is_glob=False, is_dir=True).allow("./**/*", is_glob=True),
+				)
+				self.sync.filter = new_filter
 				self.sync.run()
 
 	def on_modified(self, event):
@@ -77,7 +94,11 @@ class _LocalWatcher(FileSystemEventHandler):
 		self.sync.reset()
 		relpath = os.path.relpath(event.src_path, self.sync.src)
 		if isinstance(event, FileModifiedEvent):
-			self.sync.filter = PathFilter(is_glob=False).allow(relpath)
+			new_filter = AllFilter(
+				self.base_filter,
+				PathFilter(is_glob=False).allow(relpath),
+			)
+			self.sync.filter = new_filter
 			self.sync.run()
 		else:
 			pass
@@ -88,17 +109,25 @@ class _LocalWatcher(FileSystemEventHandler):
 		src_relpath = os.path.relpath(event.src_path, self.sync.src)
 		dst_relpath = os.path.relpath(event.dest_path, self.sync.src)
 		if isinstance(event, FileMovedEvent):
-			self.sync.filter = PathFilter(is_glob=False).allow(src_relpath, dst_relpath)
+			new_filter = AllFilter(
+				self.base_filter,
+				PathFilter(is_glob=False).allow(src_relpath, dst_relpath),
+			)
+			self.sync.filter = new_filter
 			self.sync.run()
 		else:
 			if self.sync.delete_files or self.sync.trash:
-				self.sync.filter = PathFilter().allow(
-					src_relpath,
-					dst_relpath,
-					is_glob=False,
-					is_dir = True,
-				).allow(
-					"./**/*",
-					is_glob=True,
+				new_filter = AllFilter(
+					self.base_filter,
+					PathFilter().allow(
+						src_relpath,
+						dst_relpath,
+						is_glob=False,
+						is_dir = True,
+					).allow(
+						"./**/*",
+						is_glob=True,
+					),
 				)
+				self.sync.filter = new_filter
 				self.sync.run()

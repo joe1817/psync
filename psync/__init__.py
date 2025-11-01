@@ -2,7 +2,7 @@
 # GNU General Public License v3.0
 
 from .core import Sync, Results, Operation, CreateFileOperation, UpdateFileOperation, RenameFileOperation, DeleteFileOperation, TrashFileOperation, CreateDirOperation, DeleteDirOperation
-from .filter import Filter, PathFilter
+from .filter import Filter, PathFilter, AllFilter
 from .sftp import RemotePath
 from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError, UnsupportedOperationError
 
@@ -19,6 +19,7 @@ __all__ = [
 	"DeleteDirOperation",
 	"Filter",
 	"PathFilter",
+	"AllFilter",
 	"RemotePath",
 	"MetadataUpdateError",
 	"DirDeleteError",

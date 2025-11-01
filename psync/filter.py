@@ -12,10 +12,16 @@ if sys.version_info >= (3, 13):
 else:
 	import glob2 as glob
 
+from .types import PathLikeType
 from .errors import StateError
 
 class Filter:
-	def filter(self, relpath:str, default:bool|None = None) -> bool:
+	'''Abstract base class for all file filtering objects used by `Sync`.'''
+
+	def __init__(self, default:bool = False):
+		self.default = default
+
+	def filter(self, root:PathLikeType|None, relpath:str, default:bool|None = None) -> bool:
 		raise NotImplementedError()
 
 class PathFilter(Filter):
@@ -218,7 +224,7 @@ class PathFilter(Filter):
 			glob_string += "\\"
 		return glob_string
 
-	def __init__(self, filter_string:str = "", *, ignore_hidden:bool = False, ignore_case:bool = False, is_glob:bool = True, glob_is_escaped:bool = False, default:bool = False):
+	def __init__(self, filter_string:str = "", *, ignore_hidden:bool = False, ignore_case:bool = False, is_glob:bool = True, glob_is_escaped:bool = False):
 		'''
 		Initialize a Filter object.
 
@@ -230,11 +236,12 @@ class PathFilter(Filter):
 			glob_is_escaped   (bool) : Whether glob characters in the filter string are escaped (with "\\"), indicating that they should be interpretted as literals.
 			default           (bool) : The default value for non-matching files and directories. (Defaults to `False`.)
 		'''
+		super().__init__()
+
 		self.ignore_hidden   = ignore_hidden
 		self.ignore_case     = ignore_case
 		self.is_glob         = is_glob
 		self.glob_is_escaped = glob_is_escaped
-		self.default         = default
 
 		self._segments : list[PathFilter._Segment] = []
 		self._tmp_allowed : set[str] = set() # directories implied when allowing an entry with multiple path segments
@@ -356,7 +363,7 @@ class PathFilter(Filter):
 					segment.is_implicit = True
 					yield segment
 
-	def filter(self, relpath:str, default:bool|None = None) -> bool:
+	def filter(self, root:PathLikeType|None, relpath:str, default:bool|None = None) -> bool:
 		'''Compare the file path against the filter string.'''
 
 		for segment in self._segments:
@@ -369,3 +376,19 @@ class PathFilter(Filter):
 
 	def __repr__(self):
 		return "PathFilter('" + str(self).replace("'", "\\'") + "')"
+
+class AllFilter(Filter):
+	'''Filter that allows or rejects based on child Filters.'''
+
+	def __init__(self, *filters:Filter):
+		super().__init__()
+
+		if not filters:
+			raise ValueError("Missing required argument: filters")
+		self.filters = filters
+
+	def filter(self, root:PathLikeType|None, relpath:str, default:bool|None = None) -> bool:
+		if all(f.filter(root, relpath) for f in self.filters):
+			return True
+		else:
+			return default if default is not None else self.default

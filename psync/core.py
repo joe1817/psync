@@ -744,17 +744,17 @@ class Sync:
 							if self.ignore_symlinks and entry.is_symlink():
 								continue
 							if self.follow_symlinks:
-								is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+								if entry.is_dir(follow_symlinks=True) or entry.is_junction():
+									dirs.append(entry)
+								elif entry.is_file(follow_symlinks=True):
+									nondirs.append(entry)
 							else:
-								is_dir = entry.is_dir(follow_symlinks=False)
+								if entry.is_dir(follow_symlinks=False):
+									dirs.append(entry)
+								elif entry.is_file(follow_symlinks=False) or entry.is_symlink():
+									nondirs.append(entry)
 						except OSError as e:
 							self.logger.warning(_exc_summary(e))
-							continue
-
-						if is_dir:
-							dirs.append(entry)
-						else:
-							nondirs.append(entry)
 			except OSError as e:
 				# top does not exist or user has no read access
 				self.logger.warning(_exc_summary(e))

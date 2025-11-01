@@ -251,7 +251,7 @@ class Sync:
 			src    (str or PathLike) : The path of the root directory to copy files from. Can be a symlink to a directory.
 			dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
 
-			filter   (str or Filter) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. Note that it is still possible for excluded files in `dst` to be overwritten. (Defaults to "+ **/*/ **/*", which searches all directories and copies all files.)
+			filter   (str or Filter) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. (Defaults to "+ **/*", which searches all directories and copies all files.)
 			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
 			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
 
@@ -280,7 +280,7 @@ class Sync:
 		self.src = src
 		self.dst = dst
 
-		self._filter           : Filter = PathFilter("+ **/*/ **/*")
+		self._filter           : Filter = PathFilter("+ **/*")
 		self._trash            : PathType|None = None
 		self._delete_files     : bool = False
 		self._force_update     : bool = False

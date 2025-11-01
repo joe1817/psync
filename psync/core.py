@@ -231,6 +231,7 @@ class Sync:
 		"filter",
 		"trash",
 		"delete_files",
+		"no_create",
 		"force_update",
 		"metadata_only",
 		"rename_threshold",
@@ -258,6 +259,7 @@ class Sync:
 
 			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
 			delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst` but not `src`). Mutually exclusive with `trash`. (Defaults to `False`.)
+			no_create         (bool) : Whether to prevent the creation of any files or directories in `dst`. (Defaults to `False`.)
 			force_update      (bool) : Whether to allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
 			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
@@ -284,6 +286,7 @@ class Sync:
 		self._filter           : Filter = PathFilter("+ **/*")
 		self._trash            : PathType|None = None
 		self._delete_files     : bool = False
+		self._no_create        : bool = False
 		self._force_update     : bool = False
 		self._metadata_only    : bool = False
 		self._rename_threshold : int|None = 10000
@@ -507,6 +510,19 @@ class Sync:
 		if val and self.trash:
 			raise RuntimeError("Mutually exclusive properties: 'trash' and 'delete_files'")
 		self._delete_files = val
+
+	@property
+	def no_create(self) -> bool:
+		return self._no_create
+
+	@no_create.setter
+	def no_create(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'no_create' (expected bool): {val}")
+		self._no_create = val
 
 	@property
 	def force_update(self) -> bool:
@@ -1043,17 +1059,18 @@ class Sync:
 				yield from _automatic_dir_delete_ops(dst_relpath)
 
 		# Create files
-		for src_relpath in src_only_relpaths:
-			src_relpath_real = src_real_names[src_relpath]
-			src = self.src / src_relpath_real
-			dst = self.dst / src_relpath_real
-			byte_diff = src_meta[src_relpath].size
-			yield CreateFileOperation(
-				src = src,
-				dst = dst,
-				byte_diff = byte_diff,
-				summary = f"+ {src_relpath_real}"
-			)
+		if not self.no_create:
+			for src_relpath in src_only_relpaths:
+				src_relpath_real = src_real_names[src_relpath]
+				src = self.src / src_relpath_real
+				dst = self.dst / src_relpath_real
+				byte_diff = src_meta[src_relpath].size
+				yield CreateFileOperation(
+					src = src,
+					dst = dst,
+					byte_diff = byte_diff,
+					summary = f"+ {src_relpath_real}"
+				)
 
 		# Update files that have newer mtimes
 		for relpath in both_relpaths:
@@ -1083,17 +1100,18 @@ class Sync:
 					self.logger.warning(f"'src' file is older than 'dst' file, skipping update: {relpath}")
 
 		# Create empty directories
-		src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
-		for relpath in src_only_empty_dirs:
-			if relpath not in dst_dirs:
-				src_relpath_real = src_real_names[relpath]
-				dst = self.dst / src_relpath_real
-				yield CreateDirOperation(
-					src = None,
-					dst = dst,
-					byte_diff = 0,
-					summary = f"+ {src_relpath_real}{display_sep}"
-				)
+		if not self.no_create:
+			src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
+			for relpath in src_only_empty_dirs:
+				if relpath not in dst_dirs:
+					src_relpath_real = src_real_names[relpath]
+					dst = self.dst / src_relpath_real
+					yield CreateDirOperation(
+						src = None,
+						dst = dst,
+						byte_diff = 0,
+						summary = f"+ {src_relpath_real}{display_sep}"
+					)
 
 	def run(self) -> Results:
 		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''
@@ -1106,7 +1124,7 @@ class Sync:
 			FOOTER  = _RecordTag.FOOTER.dict()
 			SYNC_OP = _RecordTag.SYNC_OP.dict()
 
-			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
+			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.no_create=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
 			self.logger.debug("")
 
 			width = max(len(str(self.src)), len(str(self.dst)), 7) + 3

@@ -39,6 +39,11 @@ class TestSync(unittest.TestCase):
 			with self.assertRaises(RuntimeError):
 				sync.trash = root
 
+			sync.no_create = True
+			self.assertEqual(sync.no_create, True)
+			sync.no_create = False
+			self.assertEqual(sync.no_create, False)
+
 			sync.force_update = True
 			self.assertEqual(sync.force_update, True)
 			sync.force_update = False

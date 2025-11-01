@@ -35,6 +35,7 @@ class _ArgParser:
 	extra_handling.add_argument("-x", "--delete-files", action="store_true", default=False, help="Permanently delete 'extra' files (those that are in 'dst' but not 'src').")
 
 	parser.add_argument("-F", "--force-update", action="store_true", default=False, help="Allow replacement of any newer files in 'dst' with older copies in 'src'.")
+	parser.add_argument("-nc", "--no-create", action="store_true", default=False, help="Prevent the creation of any files or directories in 'dst'.")
 	parser.add_argument("-m", "--metadata_only", action="store_true", default=False, help="Use only metadata in determining which files in 'dst' are the result of a rename. Otherwise, the backup process will also compare the last 1kb of files.")
 	parser.add_argument("-R", "--rename-threshold", metavar="size", type=int, default=10000, help="The minimum size in bytes needed to consider renaming files in dst to match those in 'src'. Renamed files below this threshold will be simply deleted in dst and their replacements copied over.")
 
@@ -105,6 +106,7 @@ def main(args:list[str]) -> None:
 
 				trash            = parsed_args.trash,
 				delete_files     = parsed_args.delete_files,
+				no_create        = parsed_args.no_create,
 				force_update     = parsed_args.force_update,
 				metadata_only    = parsed_args.metadata_only,
 				rename_threshold = parsed_args.rename_threshold,

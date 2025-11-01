@@ -8,7 +8,6 @@ import argparse
 from .core import Sync, Results
 from .filter import PathFilter
 from .sftp import RemotePath
-from .watch import watch
 from .log import logger
 
 class _ArgParser:
@@ -122,7 +121,7 @@ def main(args:list[str]) -> None:
 			sys.exit(1)
 
 		if parsed_args.watch:
-			watch(sync)
+			sync.watch()
 		else:
 			sync.run()
 

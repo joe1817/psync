@@ -18,6 +18,7 @@ from collections import Counter
 from .filter import Filter, PathFilter
 from .helpers import _reverse_dict, _human_readable_size
 from .sftp import RemotePath, _RemotePathScanner
+from .watch import _LocalWatcher
 from .types import PathType, PathLikeType
 from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
@@ -1168,6 +1169,12 @@ class Sync:
 			self._state = Sync._SyncState.TERMINATED
 
 		return self.results
+
+	def watch(self):
+		if isinstance(self.src, RemotePath):
+			raise UnsupportedOperationError("Can only watch local directories.")
+		else:
+			_LocalWatcher(self).watch()
 
 def _copy(src:PathType, dst:PathType, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
 	'''Copy file from `src` to `dst`, keeping timestamp metadata. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''

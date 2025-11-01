@@ -3,11 +3,14 @@
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .core import Sync
 from .filter import PathFilter, AllFilter
 from .log import logger
 from .errors import UnsupportedOperationError
+
+if TYPE_CHECKING:
+	from .core import Sync
 
 try:
 	from watchdog.observers import Observer
@@ -15,15 +18,9 @@ try:
 except ImportError:
 	pass
 
-def watch(sync:Sync):
-	if sync.sftp_compat:
-		raise UnsupportedOperationError("Can only watch local directories.")
-	else:
-		_LocalWatcher(sync).watch()
-
 class _LocalWatcher(FileSystemEventHandler):
 
-	def __init__(self, sync:Sync):
+	def __init__(self, sync:"Sync"):
 		if "Observer" not in globals():
 			raise ImportError("Watchdog package is needed to watch for filesystem changes. Install it with: pip install watchdog")
 		self.sync = sync

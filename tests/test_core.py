@@ -190,7 +190,7 @@ class TestSync(unittest.TestCase):
 				"a/1.jpg",
 			]
 			self.assertEqual(
-				sorted(f.normpath for f in files if not isinstance(f, core._NonEmptyDir)),
+				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -204,7 +204,7 @@ class TestSync(unittest.TestCase):
 				"a/ac/acb/12.html",
 			]
 			self.assertEqual(
-				sorted(f.normpath for f in files if not isinstance(f, core._NonEmptyDir)),
+				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -242,7 +242,7 @@ class TestSync(unittest.TestCase):
 				"eb",
 			]
 			self.assertEqual(
-				sorted(f.normpath for f in files if not isinstance(f, core._NonEmptyDir)),
+				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -262,7 +262,7 @@ class TestSync(unittest.TestCase):
 				"eb/2.txt",
 			]
 			self.assertEqual(
-				sorted(f.normpath for f in files if not isinstance(f, core._NonEmptyDir)),
+				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -277,7 +277,7 @@ class TestSync(unittest.TestCase):
 			]
 			with TempLoggingLevel(sync.logger, logging.ERROR):
 				self.assertEqual(
-					sorted(f.normpath for f in files if not isinstance(f, core._NonEmptyDir)),
+					sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
 					sorted(f.replace("/", os.sep) for f in files_expected)
 				)
 
@@ -291,7 +291,7 @@ class TestSync(unittest.TestCase):
 				"1.txt",
 			]
 			self.assertEqual(
-				sorted(f.normpath for f in files if not isinstance(f, core._NonEmptyDir)),
+				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -334,8 +334,8 @@ class TestSync(unittest.TestCase):
 			sync.rename_threshold = 0
 
 			actual = list(op.summary for op in sync._operations(
-				src_files = sync._scandir(root = a_root),
-				dst_files = sync._scandir(root = b_root),
+				src_entries = sync._scandir(root = a_root),
+				dst_entries = sync._scandir(root = b_root),
 			))
 
 			if "nt" in os.name:
@@ -363,8 +363,8 @@ class TestSync(unittest.TestCase):
 			sync.rename_threshold = 1000
 
 			actual = list(op.summary for op in sync._operations(
-				src_files = sync._scandir(root = a_root),
-				dst_files = sync._scandir(root = c_root),
+				src_entries = sync._scandir(root = a_root),
+				dst_entries = sync._scandir(root = c_root),
 			))
 			expected = [
 				f"T {os.path.join('aa', '1.txt')}",

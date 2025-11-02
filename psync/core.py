@@ -34,20 +34,18 @@ class _Metadata:
 class _Entry:
 	'''Filesystem entries yielded by `_scandir()`.'''
 
-	normpath : str # normcased and replaced \\ -> /
-	path     : str # relpath
+	path         : PathType
+	relpath      : str
+	norm_relpath : str # normcased and replaced \\ -> /
 
 @dataclass(frozen=True)
 class _File(_Entry):
 	meta     : _Metadata
 
 @dataclass(frozen=True)
-class _NonEmptyDir(_Entry):
-	pass
-
-@dataclass(frozen=True)
-class _EmptyDir(_Entry):
-	pass
+class _Dir(_Entry):
+	num_files    : int
+	num_dirs     : int
 
 @dataclass(frozen=True)
 class Operation:
@@ -809,16 +807,14 @@ class Sync:
 
 			# empty directory
 			if dir_relpath != "." and filter(root, dir_relpath + display_sep):
-				if file_entries or dir_entries:
-					yield _NonEmptyDir(
-						normpath = normed_dir_relpath,
-						path     = dir_relpath,
-					)
-				else:
-					yield _EmptyDir(
-						normpath = normed_dir_relpath,
-						path     = dir_relpath,
-					)
+				yield _Dir(
+					path         = root / dir_relpath,
+					relpath      = dir_relpath,
+					norm_relpath = normed_dir_relpath,
+					num_files    = len(file_entries),
+					num_dirs     = len(dir_entries),
+				)
+				if not file_entries and not dir_entries:
 					continue
 
 			# prune search tree
@@ -864,29 +860,30 @@ class Sync:
 						mtime = float(int(mtime))
 
 					yield _File(
-						normpath = normed_file_relpath,
-						path     = file_relpath,
-						meta     = _Metadata(size=size, mtime=mtime),
+						path         = root / file_relpath,
+						relpath      = file_relpath,
+						norm_relpath = normed_file_relpath,
+						meta         = _Metadata(size=size, mtime=mtime),
 					)
 
 	def _operations(
 			self,
 			*,
-			src_files : Iterator[_Entry],
-			dst_files : Iterator[_Entry],
+			src_entries : Iterator[_Entry],
+			dst_entries : Iterator[_Entry],
 		) -> Iterator[Operation]:
 		'''Generator of file system operations to perform for this sync.'''
 
 		display_sep = "/" if self.sftp_compat else os.sep
 
-		src_real_names = {}
-		dst_real_names = {}
+		src_relpaths = {}
+		dst_relpaths = {}
 
 		src_meta = {}
 		dst_meta = {}
 
-		src_relpaths = set()
-		dst_relpaths = set()
+		src_norm_relpaths = set()
+		dst_norm_relpaths = set()
 
 		src_dirs = set()
 		dst_dirs = set()
@@ -894,107 +891,112 @@ class Sync:
 		src_empty_dirs = set()
 		dst_empty_dirs = set()
 
-		for src_entry in src_files:
-			src_real_names[src_entry.normpath] = src_entry.path
+		for src_entry in src_entries:
+			src_relpaths[src_entry.norm_relpath] = src_entry.relpath
 			if isinstance(src_entry, _File):
-				src_meta[src_entry.normpath] = src_entry.meta
-				src_relpaths.add(src_entry.normpath)
-			elif isinstance(src_entry, _NonEmptyDir):
-				src_dirs.add(src_entry.normpath)
+				src_meta[src_entry.norm_relpath] = src_entry.meta
+				src_norm_relpaths.add(src_entry.norm_relpath)
 			else:
-				src_dirs.add(src_entry.normpath)
-				src_empty_dirs.add(src_entry.normpath)
+				src_entry = cast(_Dir, src_entry)
+				dir_size = src_entry.num_files + src_entry.num_dirs
+				if not dir_size:
+					src_empty_dirs.add(src_entry.norm_relpath)
+				src_dirs.add(src_entry.norm_relpath)
 
-		for dst_entry in dst_files:
-			dst_real_names[dst_entry.normpath] = dst_entry.path
+		for dst_entry in dst_entries:
+			dst_relpaths[dst_entry.norm_relpath] = dst_entry.relpath
 			if isinstance(dst_entry, _File):
-				dst_meta[dst_entry.normpath] = dst_entry.meta
-				dst_relpaths.add(dst_entry.normpath)
-			elif isinstance(dst_entry, _NonEmptyDir):
-				dst_dirs.add(dst_entry.normpath)
+				dst_meta[dst_entry.norm_relpath] = dst_entry.meta
+				dst_norm_relpaths.add(dst_entry.norm_relpath)
 			else:
-				dst_dirs.add(dst_entry.normpath)
-				dst_empty_dirs.add(dst_entry.normpath)
+				dst_entry = cast(_Dir, dst_entry)
+				dir_size = dst_entry.num_files + dst_entry.num_dirs
+				if not dir_size:
+					dst_empty_dirs.add(dst_entry.norm_relpath)
+				dst_dirs.add(dst_entry.norm_relpath)
 
-		self.logger.debug(f"{len(src_relpaths)=}")
-		self.logger.debug(f"{len(dst_relpaths)=}")
+		self.logger.debug(f"{len(src_norm_relpaths)=}")
+		self.logger.debug(f"{len(dst_norm_relpaths)=}")
 
-		src_only_relpaths = sorted(src_relpaths.difference(dst_relpaths))
-		dst_only_relpaths = sorted(dst_relpaths.difference(src_relpaths))
-		both_relpaths     = sorted(src_relpaths.intersection(dst_relpaths))
+		src_only_norm_relpaths = sorted(src_norm_relpaths.difference(dst_norm_relpaths))
+		dst_only_norm_relpaths = sorted(dst_norm_relpaths.difference(src_norm_relpaths))
+		both_norm_relpaths     = sorted(src_norm_relpaths.intersection(dst_norm_relpaths))
 
 		# Ignore remote files with invalid characters when copying to Windows
 		if os.sep == "nt" and isinstance(self.src, RemotePath):
-			for path in src_only_relpaths.copy():
+			for path in src_only_norm_relpaths.copy():
 				if os.path.isreserved(path) or "\\" in path:
 					self.logger.warning(f"Ignoring incompatible remote file: {path}")
-					src_only_relpaths.remove(path)
+					src_only_norm_relpaths.remove(path)
 
-		self.logger.debug(f"{len(src_only_relpaths)=}")
-		self.logger.debug(f"{len(dst_only_relpaths)=}")
-		self.logger.debug(f"{len(both_relpaths)=}")
+		self.logger.debug(f"{len(src_only_norm_relpaths)=}")
+		self.logger.debug(f"{len(dst_only_norm_relpaths)=}")
+		self.logger.debug(f"{len(both_norm_relpaths)=}")
 		self.logger.debug(f"{len(src_dirs)=}")
 		self.logger.debug(f"{len(dst_dirs)=}")
 		self.logger.debug(f"{len(src_empty_dirs)=}")
 		self.logger.debug(f"{len(dst_empty_dirs)=}")
 
-		self.logger.debug(f"{src_only_relpaths[:10]=}")
-		self.logger.debug(f"{dst_only_relpaths[:10]=}")
-		self.logger.debug(f"{both_relpaths[:10]=}")
+		self.logger.debug(f"{src_only_norm_relpaths[:10]=}")
+		self.logger.debug(f"{dst_only_norm_relpaths[:10]=}")
+		self.logger.debug(f"{both_norm_relpaths[:10]=}")
 		self.logger.debug(f"{list(islice(src_dirs, 10))=}")
 		self.logger.debug(f"{list(islice(dst_dirs, 10))=}")
 		self.logger.debug(f"{list(islice(src_empty_dirs, 10))=}")
 		self.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
 
-		def _automatic_dir_delete_ops(deleted_relpath:str):
-			# from closure: src_dirs, dst_real_names
-			relpath = os.path.dirname(deleted_relpath) # should keep / separators on Windows
-			while relpath and relpath not in src_dirs:
-				relpath_real = dst_real_names[relpath]
-				dir = self.dst / relpath_real
+		def _automatic_dir_delete_ops(deleted_norm_relpath:str):
+			# from closure: src_dirs, dst_relpaths
+			norm_relpath = os.path.dirname(deleted_norm_relpath) # should keep / separators on Windows
+			while norm_relpath and norm_relpath not in src_dirs:
+				relpath = dst_relpaths[norm_relpath]
+				dir = self.dst / relpath
 				if any(dir.iterdir()):
 					break
 				yield DeleteDirOperation(
-					src = dir,
-					dst = None,
+					src       = dir,
+					dst       = None,
 					byte_diff = 0,
-					summary = f"- {relpath_real}{display_sep}"
+					summary   = f"- {relpath}{display_sep}"
 				)
-				relpath = os.path.dirname(relpath)
+				norm_relpath = os.path.dirname(norm_relpath)
 
 		# Delete empty directories now in case any new files needs to take their places
 		dst_only_empty_dirs = dst_empty_dirs.difference(src_dirs)
-		for dst_relpath in dst_only_empty_dirs:
-			dst_relpath_real = dst_real_names[dst_relpath]
-			src = self.dst / dst_relpath_real
+		for dst_norm_relpath in dst_only_empty_dirs:
+			dst_relpath = dst_relpaths[dst_norm_relpath]
+			src = self.dst / dst_relpath
 			assert not any(src.iterdir())
 			yield DeleteDirOperation(
-				src = src,
-				dst = None,
+				src       = src,
+				dst       = None,
 				byte_diff = 0,
-				summary = f"- {dst_relpath_real}{display_sep}"
+				summary   = f"- {dst_relpath}{display_sep}"
 			)
-			yield from _automatic_dir_delete_ops(dst_relpath)
+			yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 		# Rename files
 		if self.rename_threshold is not None:
-			src_only_relpath_from_meta = _reverse_dict({path:src_meta[path] for path in src_only_relpaths})
-			dst_only_relpath_from_meta = _reverse_dict({path:dst_meta[path] for path in dst_only_relpaths})
+			src_only_norm_relpath_from_meta = _reverse_dict({norm_relpath:src_meta[norm_relpath] for norm_relpath in src_only_norm_relpaths})
+			dst_only_norm_relpath_from_meta = _reverse_dict({norm_relpath:dst_meta[norm_relpath] for norm_relpath in dst_only_norm_relpaths})
 
-			for dst_relpath in list(dst_only_relpaths): # dst_only_relpaths is changed inside the loop
+			for dst_norm_relpath in list(dst_only_norm_relpaths): # dst_only_norm_relpaths is changed inside the loop
 				# Ignore small files
-				if dst_meta[dst_relpath].size < self.rename_threshold:
+				if dst_meta[dst_norm_relpath].size < self.rename_threshold:
 					continue
 				try:
-					rename_to = src_only_relpath_from_meta[dst_meta[dst_relpath]]
+					src_norm_relpath = src_only_norm_relpath_from_meta[dst_meta[dst_norm_relpath]]
 					# Ignore if there are multiple candidates
-					if rename_to is None:
+					if src_norm_relpath is None:
 						continue
 
-					rename_from = dst_only_relpath_from_meta[dst_meta[dst_relpath]]
+					dst_norm_relpath = dst_only_norm_relpath_from_meta[dst_meta[dst_norm_relpath]]
 					# Ignore if there are multiple candidates
-					if rename_from is None:
+					if dst_norm_relpath is None:
 						continue
+
+					rename_from = dst_relpaths[dst_norm_relpath]
+					rename_to = src_relpaths[src_norm_relpath]
 
 					# Ignore if last 1kb do not match
 					if not self.metadata_only:
@@ -1007,22 +1009,16 @@ class Sync:
 							self.logger.warning(_exc_summary(e))
 							continue
 
-					src_only_relpaths.remove(rename_to)
-					dst_only_relpaths.remove(rename_from)
-
-					rename_from = dst_real_names[rename_from]
-					rename_to = src_real_names[rename_to]
-
-					src = self.dst / rename_from
-					dst = self.dst / rename_to
+					src_only_norm_relpaths.remove(src_norm_relpath)
+					dst_only_norm_relpaths.remove(dst_norm_relpath)
 
 					yield RenameFileOperation(
-						src = src,
-						dst = dst,
+						src       = self.dst / rename_from,
+						dst       = self.dst / rename_to,
 						byte_diff = 0,
-						summary = f"R {rename_from} -> {rename_to}"
+						summary   = f"R {rename_from} -> {rename_to}"
 					)
-					yield from _automatic_dir_delete_ops(dst_relpath)
+					yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 				except KeyError:
 					# dst file not a result of a rename
@@ -1030,87 +1026,75 @@ class Sync:
 
 		# Delete files
 		if self.delete_files:
-			for dst_relpath in dst_only_relpaths:
-				dst_relpath_real = dst_real_names[dst_relpath]
-				src = self.dst / dst_relpath_real
-				byte_diff = -dst_meta[dst_relpath].size
+			for dst_norm_relpath in dst_only_norm_relpaths:
+				dst_relpath = dst_relpaths[dst_norm_relpath]
 				yield DeleteFileOperation(
-					src = src,
-					dst = None,
-					byte_diff = byte_diff,
-					summary = f"- {dst_relpath_real}"
+					src       = self.dst / dst_relpath,
+					dst       = None,
+					byte_diff = -dst_meta[dst_norm_relpath].size,
+					summary   = f"- {dst_relpath}"
 				)
-				yield from _automatic_dir_delete_ops(dst_relpath)
+				yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 		# Send files to trash
 		elif self.trash is not None:
-			for dst_relpath in dst_only_relpaths:
-				dst_relpath_real = dst_real_names[dst_relpath]
-				src = self.dst / dst_relpath_real
-				dst = self.trash / dst_relpath_real
-				#byte_diff = -dst_meta[dst_relpath].size
-				byte_diff = 0
+			for dst_norm_relpath in dst_only_norm_relpaths:
+				dst_relpath = dst_relpaths[dst_norm_relpath]
 				yield TrashFileOperation(
-					src = src,
-					dst = dst,
-					byte_diff = byte_diff,
-					summary = f"T {dst_relpath_real}"
+					src       = self.dst / dst_relpath,
+					dst       = self.trash / dst_relpath,
+					byte_diff = 0,
+					summary   = f"T {dst_relpath}"
 				)
-				yield from _automatic_dir_delete_ops(dst_relpath)
+				yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 		# Create files
 		if not self.no_create:
-			for src_relpath in src_only_relpaths:
-				src_relpath_real = src_real_names[src_relpath]
-				src = self.src / src_relpath_real
-				dst = self.dst / src_relpath_real
-				byte_diff = src_meta[src_relpath].size
+			for src_norm_relpath in src_only_norm_relpaths:
+				src_relpath = src_relpaths[src_norm_relpath]
 				yield CreateFileOperation(
-					src = src,
-					dst = dst,
-					byte_diff = byte_diff,
-					summary = f"+ {src_relpath_real}"
+					src       = self.src / src_relpath,
+					dst       = self.dst / src_relpath,
+					byte_diff = src_meta[src_norm_relpath].size,
+					summary   = f"+ {src_relpath}"
 				)
 
 		# Update files that have newer mtimes
-		for relpath in both_relpaths:
-			src_relpath_real = src_real_names[relpath]
-			dst_relpath_real = dst_real_names[relpath]
-			src = self.src / src_relpath_real
-			dst = self.dst / dst_relpath_real
-			byte_diff = src_meta[relpath].size - dst_meta[relpath].size
-			src_time = src_meta[relpath].mtime
-			dst_time = dst_meta[relpath].mtime
+		for norm_relpath in both_norm_relpaths:
+			src_relpath = src_relpaths[norm_relpath]
+			dst_relpath = dst_relpaths[norm_relpath]
+			src_time = src_meta[norm_relpath].mtime
+			dst_time = dst_meta[norm_relpath].mtime
+			byte_diff = src_meta[norm_relpath].size - dst_meta[norm_relpath].size
 			if src_time > dst_time:
 				yield UpdateFileOperation(
-					src = src,
-					dst = dst,
+					src       = self.src / src_relpath,
+					dst       = self.dst / dst_relpath,
 					byte_diff = byte_diff,
-					summary = f"U {dst_relpath_real}"
+					summary   = f"U {dst_relpath}"
 				)
 			elif src_time < dst_time:
 				if self.force_update:
 					yield UpdateFileOperation(
-						src = src,
-						dst = dst,
+						src       = self.src / src_relpath,
+						dst       = self.dst / dst_relpath,
 						byte_diff = byte_diff,
-						summary = f"U {dst_relpath_real}"
+						summary   = f"U {dst_relpath}"
 					)
 				else:
-					self.logger.warning(f"'src' file is older than 'dst' file, skipping update: {relpath}")
+					self.logger.warning(f"'src' file is older than 'dst' file, skipping update: {norm_relpath}")
 
 		# Create empty directories
 		if not self.no_create:
-			src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_files.nonempty_dirs)
-			for relpath in src_only_empty_dirs:
-				if relpath not in dst_dirs:
-					src_relpath_real = src_real_names[relpath]
-					dst = self.dst / src_relpath_real
+			src_only_empty_dirs = src_empty_dirs.difference(dst_empty_dirs)#.difference(dst_entries.nonempty_dirs)
+			for norm_relpath in src_only_empty_dirs:
+				if norm_relpath not in dst_dirs:
+					src_relpath = src_relpaths[norm_relpath]
 					yield CreateDirOperation(
-						src = None,
-						dst = dst,
+						src       = None,
+						dst       = self.dst / src_relpath,
 						byte_diff = 0,
-						summary = f"+ {src_relpath_real}{display_sep}"
+						summary   = f"+ {src_relpath}{display_sep}"
 					)
 
 	def run(self) -> Results:
@@ -1132,15 +1116,15 @@ class Sync:
 			self.logger.info("-> " + str(self.dst), extra=HEADER)
 			self.logger.info("-" * width, extra=HEADER)
 
-			src_files = self._scandir(self.src)
+			src_entries = self._scandir(self.src)
 			if self.dst.exists():
-				dst_files = self._scandir(self.dst)
+				dst_entries = self._scandir(self.dst)
 			else:
-				dst_files = iter([])
+				dst_entries = iter([])
 
 			for op in self._operations(
-				src_files = src_files,
-				dst_files = dst_files,
+				src_entries = src_entries,
+				dst_entries = dst_entries,
 			):
 				self.logger.info(op.summary, extra=SYNC_OP)
 

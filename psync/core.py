@@ -62,6 +62,43 @@ class Operation:
 	def perform(self, sync:"Sync"):
 		raise NotImplementedError()
 
+	def depends_on(self, op:"Operation"):
+		'''Returns `True` if this Operation would fail if the Operation `op` were to fail beforehand or not to occur.'''
+
+		in_path  = None
+		out_path = None
+
+		if isinstance(self, CreateFileOperation):
+			in_path = self.dst
+		elif isinstance(self, RenameFileOperation):
+			in_path = self.target
+		#elif isinstance(self, TrashFileOperation):
+		#	in_path = self.target
+		elif isinstance(self, CreateDirOperation):
+			in_path = self.dst
+
+		if isinstance(op, RenameFileOperation):
+			out_path = op.dst
+		elif isinstance(op, DeleteFileOperation):
+			out_path = op.dst
+		elif isinstance(op, TrashFileOperation):
+			out_path = op.dst
+		elif isinstance(op, CreateDirOperation):
+			out_path = op.dst
+		elif isinstance(op, DeleteDirOperation):
+			out_path = op.dst
+
+		if in_path is None or out_path is None:
+			return False
+		else:
+			if isinstance(in_path, Path):
+				assert isinstance(out_path, Path)
+				return in_path.is_relative_to(out_path)
+			else:
+				assert isinstance(in_path, Path)
+				assert isinstance(out_path, Path)
+				return in_path.is_relative_to(out_path)
+
 	def __str__(self):
 		return self.summary
 
@@ -1188,6 +1225,10 @@ class Sync:
 				src_entries = src_entries,
 				dst_entries = dst_entries,
 			):
+				if any(op.depends_on(failed_op) for failed_op, _ in self.results.sync_errors):
+					self.logger.debug(f"Dependent failure: {op.summary}")
+					continue
+
 				self.logger.info(op.summary, extra=SYNC_OP)
 
 				if not self.dry_run:

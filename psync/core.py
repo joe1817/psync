@@ -914,6 +914,8 @@ class Sync:
 		src_empty_dirs = set()
 		dst_empty_dirs = set()
 
+		dst_dir_size: CounterType[str] = Counter()
+
 		for src_entry in src_entries:
 			src_relpaths[src_entry.norm_relpath] = src_entry.relpath
 			if isinstance(src_entry, _File):
@@ -937,6 +939,7 @@ class Sync:
 				if not dir_size:
 					dst_empty_dirs.add(dst_entry.norm_relpath)
 				dst_dirs.add(dst_entry.norm_relpath)
+				dst_dir_size[dst_entry.norm_relpath] = dir_size
 
 		self.logger.debug(f"{len(src_norm_relpaths)=}")
 		self.logger.debug(f"{len(dst_norm_relpaths)=}")
@@ -973,13 +976,16 @@ class Sync:
 			while norm_relpath and norm_relpath not in src_dirs:
 				relpath = dst_relpaths[norm_relpath]
 				dir = self.dst / relpath
-				if any(dir.iterdir()):
+				if dst_dir_size[norm_relpath]:
 					break
 				yield DeleteDirOperation(
 					dst       = dir,
 					summary   = f"- {relpath}{display_sep}"
 				)
 				norm_relpath = os.path.dirname(norm_relpath)
+				if norm_relpath:
+					dst_dir_size[norm_relpath] -= 1
+					assert dst_dir_size[norm_relpath] >= 0
 
 		# Delete empty directories now in case any new files needs to take their places
 		dst_only_empty_dirs = dst_empty_dirs.difference(src_dirs)
@@ -991,6 +997,10 @@ class Sync:
 				dst       = dst,
 				summary   = f"- {dst_relpath}{display_sep}"
 			)
+			parent_dir = os.path.dirname(dst_norm_relpath)
+			if parent_dir:
+				dst_dir_size[parent_dir] -= 1
+				assert dst_dir_size[parent_dir] >= 0
 			yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 		# Rename files
@@ -1035,6 +1045,10 @@ class Sync:
 						target    = self.dst / rename_to,
 						summary   = f"R {rename_from} -> {rename_to}"
 					)
+					parent_dir = os.path.dirname(dst_norm_relpath)
+					if parent_dir:
+						dst_dir_size[parent_dir] -= 1
+						assert dst_dir_size[parent_dir] >= 0
 					yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 				except KeyError:
@@ -1050,6 +1064,10 @@ class Sync:
 					byte_diff = -dst_meta[dst_norm_relpath].size,
 					summary   = f"- {dst_relpath}"
 				)
+				parent_dir = os.path.dirname(dst_norm_relpath)
+				if parent_dir:
+					dst_dir_size[parent_dir] -= 1
+					assert dst_dir_size[parent_dir] >= 0
 				yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 		# Send files to trash
@@ -1061,6 +1079,10 @@ class Sync:
 					target    = self.trash / dst_relpath,
 					summary   = f"T {dst_relpath}"
 				)
+				parent_dir = os.path.dirname(dst_norm_relpath)
+				if parent_dir:
+					dst_dir_size[parent_dir] -= 1
+					assert dst_dir_size[parent_dir] >= 0
 				yield from _automatic_dir_delete_ops(dst_norm_relpath)
 
 		# Create files
@@ -1073,6 +1095,7 @@ class Sync:
 					byte_diff = src_meta[src_norm_relpath].size,
 					summary   = f"+ {src_relpath}"
 				)
+				# No need to update dir size anymore
 
 		# Update files that have newer mtimes
 		for norm_relpath in both_norm_relpaths:

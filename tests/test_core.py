@@ -341,12 +341,14 @@ class TestSync(unittest.TestCase):
 			if "nt" in os.name:
 				expected = [
 					f"- {os.path.join('empty', 'empty2') + os.sep}",
+					f"- empty{os.sep}",
 					f"U {os.path.join('A', '1.txt')}",
 				]
 			else:
 				expected = [
 					f"R {os.path.join('a', '1.txt')} -> {os.path.join('A', '1.txt')}",
 					f"- {os.path.join('empty', 'empty2') + os.sep}"
+					f"- empty{os.sep}",
 				]
 			self.assertEqual(actual, expected)
 
@@ -368,7 +370,8 @@ class TestSync(unittest.TestCase):
 			))
 			expected = [
 				f"T {os.path.join('aa', '1.txt')}",
-				f"+ {os.path.join('a', '1.txt')}"
+				f"- aa{os.sep}",
+				f"+ {os.path.join('a', '1.txt')}",
 			]
 			self.assertEqual(actual, expected)
 

@@ -51,11 +51,13 @@ class _Dir(_Entry):
 class Operation:
 	'''Filesystem operation yielded by `_operations()`.'''
 
-	src       : PathType | None
-	dst       : PathType | None
-	byte_diff : int
+	name  = ""
+
 	summary   : str
-	name      : str
+	dst       : PathType
+	src       : PathType | None = None
+	target    : PathType | None = None
+	byte_diff : int = 0
 
 	def perform(self, sync:"Sync"):
 		raise NotImplementedError()
@@ -65,64 +67,85 @@ class Operation:
 
 @dataclass(frozen=True)
 class CreateFileOperation(Operation):
-	src  : PathType
-	dst  : PathType
-	name : str = "Create"
+	name = "Create"
+
+	def __post_init__(self):
+		assert self.src is not None
+		assert self.target is None
 
 	def perform(self, sync:"Sync"):
+		assert self.src is not None
 		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
 
 @dataclass(frozen=True)
 class UpdateFileOperation(Operation):
-	src  : PathType
-	dst  : PathType
-	name : str = "Update"
+	name = "Update"
+
+	def __post_init__(self):
+		assert self.src is not None
+		assert self.target is None
 
 	def perform(self, sync:"Sync"):
+		assert self.src is not None
 		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
 
 @dataclass(frozen=True)
 class RenameFileOperation(Operation):
-	src  : PathType
-	dst  : PathType
-	name : str = "Rename"
+	name = "Rename"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is not None
 
 	def perform(self, sync:"Sync"):
-		_move(self.src, self.dst)
+		assert self.target is not None
+		_move(self.dst, self.target)
 
 @dataclass(frozen=True)
 class DeleteFileOperation(Operation):
-	src  : PathType
-	name : str = "Delete"
+	name = "Delete"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is None
 
 	def perform(self, sync:"Sync"):
-		self.src.unlink()
+		self.dst.unlink()
 
 @dataclass(frozen=True)
 class TrashFileOperation(Operation):
-	src  : PathType
-	dst  : PathType
-	name : str = "Trash"
+	name = "Trash"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is not None
 
 	def perform(self, sync:"Sync"):
-		_move(self.src, self.dst)
+		assert self.target is not None
+		_move(self.dst, self.target)
 
 @dataclass(frozen=True)
 class CreateDirOperation(Operation):
-	dst  : PathType
-	name : str = "Create Dir"
+	name = "Create Dir"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is None
 
 	def perform(self, sync:"Sync"):
 		self.dst.mkdir(exist_ok=True, parents=True)
 
 @dataclass(frozen=True)
 class DeleteDirOperation(Operation):
-	src  : PathType
-	name : str = "Delete Dir"
+	name = "Delete Dir"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is None
 
 	def perform(self, sync:"Sync"):
 		try:
-			self.src.rmdir()
+			self.dst.rmdir()
 		except OSError as e:
 			raise DirDeleteError(_exc_summary(e)) from e
 
@@ -946,7 +969,6 @@ class Sync:
 		self.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
 
 		def _automatic_dir_delete_ops(deleted_norm_relpath:str):
-			# from closure: src_dirs, dst_relpaths
 			norm_relpath = os.path.dirname(deleted_norm_relpath) # should keep / separators on Windows
 			while norm_relpath and norm_relpath not in src_dirs:
 				relpath = dst_relpaths[norm_relpath]
@@ -954,9 +976,7 @@ class Sync:
 				if any(dir.iterdir()):
 					break
 				yield DeleteDirOperation(
-					src       = dir,
-					dst       = None,
-					byte_diff = 0,
+					dst       = dir,
 					summary   = f"- {relpath}{display_sep}"
 				)
 				norm_relpath = os.path.dirname(norm_relpath)
@@ -965,12 +985,10 @@ class Sync:
 		dst_only_empty_dirs = dst_empty_dirs.difference(src_dirs)
 		for dst_norm_relpath in dst_only_empty_dirs:
 			dst_relpath = dst_relpaths[dst_norm_relpath]
-			src = self.dst / dst_relpath
-			assert not any(src.iterdir())
+			dst = self.dst / dst_relpath
+			assert not any(dst.iterdir())
 			yield DeleteDirOperation(
-				src       = src,
-				dst       = None,
-				byte_diff = 0,
+				dst       = dst,
 				summary   = f"- {dst_relpath}{display_sep}"
 			)
 			yield from _automatic_dir_delete_ops(dst_norm_relpath)
@@ -1013,9 +1031,8 @@ class Sync:
 					dst_only_norm_relpaths.remove(dst_norm_relpath)
 
 					yield RenameFileOperation(
-						src       = self.dst / rename_from,
-						dst       = self.dst / rename_to,
-						byte_diff = 0,
+						dst       = self.dst / rename_from,
+						target    = self.dst / rename_to,
 						summary   = f"R {rename_from} -> {rename_to}"
 					)
 					yield from _automatic_dir_delete_ops(dst_norm_relpath)
@@ -1029,8 +1046,7 @@ class Sync:
 			for dst_norm_relpath in dst_only_norm_relpaths:
 				dst_relpath = dst_relpaths[dst_norm_relpath]
 				yield DeleteFileOperation(
-					src       = self.dst / dst_relpath,
-					dst       = None,
+					dst       = self.dst / dst_relpath,
 					byte_diff = -dst_meta[dst_norm_relpath].size,
 					summary   = f"- {dst_relpath}"
 				)
@@ -1041,9 +1057,8 @@ class Sync:
 			for dst_norm_relpath in dst_only_norm_relpaths:
 				dst_relpath = dst_relpaths[dst_norm_relpath]
 				yield TrashFileOperation(
-					src       = self.dst / dst_relpath,
-					dst       = self.trash / dst_relpath,
-					byte_diff = 0,
+					dst       = self.dst / dst_relpath,
+					target    = self.trash / dst_relpath,
 					summary   = f"T {dst_relpath}"
 				)
 				yield from _automatic_dir_delete_ops(dst_norm_relpath)
@@ -1091,9 +1106,7 @@ class Sync:
 				if norm_relpath not in dst_dirs:
 					src_relpath = src_relpaths[norm_relpath]
 					yield CreateDirOperation(
-						src       = None,
 						dst       = self.dst / src_relpath,
-						byte_diff = 0,
 						summary   = f"+ {src_relpath}{display_sep}"
 					)
 

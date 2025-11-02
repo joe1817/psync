@@ -750,7 +750,6 @@ class Sync:
 						except OSError as e:
 							self.logger.warning(_exc_summary(e))
 							continue
-
 						if is_dir:
 							dirs.append(entry)
 						else:
@@ -818,6 +817,14 @@ class Sync:
 
 			# prune files
 			for entry in file_entries:
+				# Ignore non-standard files (e.g., sockets, named pipes, block & character devices), except symlinks.
+				if self.follow_symlinks:
+					if not entry.is_file(follow_symlinks=True):
+						continue
+				else:
+					if not entry.is_file(follow_symlinks=False) and not entry.is_symlink():
+						continue
+
 				filename = entry.name
 				file_path = dir / filename
 				file_relpath = str(_relative_to(file_path, root))

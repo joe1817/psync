@@ -1040,6 +1040,14 @@ class Sync:
 					src_only_norm_relpaths.remove(src_norm_relpath)
 					dst_only_norm_relpaths.remove(dst_norm_relpath)
 
+					parent_dir = os.path.dirname(src_norm_relpath)
+					if parent_dir:
+						if dst_dir_size[parent_dir] == 0:
+							yield CreateDirOperation(
+								dst       = self.dst / dst_relpaths[parent_dir],
+								summary   = f"+ {parent_dir}{display_sep}"
+							)
+							dst_dir_size[parent_dir] += 1
 					yield RenameFileOperation(
 						dst       = self.dst / rename_from,
 						target    = self.dst / rename_to,
@@ -1074,6 +1082,16 @@ class Sync:
 		elif self.trash is not None:
 			for dst_norm_relpath in dst_only_norm_relpaths:
 				dst_relpath = dst_relpaths[dst_norm_relpath]
+				# Don't want the summary of this logged liked the others, since it takes place in the trash folder.
+				# As a result, this Operation can't be added to a list of failed Operations during the sync.
+				#parent_dir = os.path.dirname(dst_norm_relpath)
+				#if parent_dir:
+				#	if dst_dir_size[parent_dir] == 0:
+				#		yield CreateDirOperation(
+				#			dst       = self.trash / dst_relpaths[parent_dir],
+				#			summary   = f"+ {parent_dir}{display_sep}"
+				#		)
+				#	dst_dir_size[parent_dir] += 1
 				yield TrashFileOperation(
 					dst       = self.dst / dst_relpath,
 					target    = self.trash / dst_relpath,
@@ -1089,6 +1107,14 @@ class Sync:
 		if not self.no_create:
 			for src_norm_relpath in src_only_norm_relpaths:
 				src_relpath = src_relpaths[src_norm_relpath]
+				parent_dir = os.path.dirname(src_norm_relpath)
+				if parent_dir:
+					if dst_dir_size[parent_dir] == 0:
+						yield CreateDirOperation(
+							dst       = self.dst / src_relpaths[parent_dir],
+							summary   = f"+ {parent_dir}{display_sep}"
+						)
+					dst_dir_size[parent_dir] += 1
 				yield CreateFileOperation(
 					src       = self.src / src_relpath,
 					dst       = self.dst / src_relpath,

@@ -371,6 +371,7 @@ class TestSync(unittest.TestCase):
 			expected = [
 				f"T {os.path.join('aa', '1.txt')}",
 				f"- aa{os.sep}",
+				f"+ a{os.sep}",
 				f"+ {os.path.join('a', '1.txt')}",
 			]
 			self.assertEqual(actual, expected)

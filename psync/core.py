@@ -961,7 +961,11 @@ class Sync:
 					if not self.metadata_only:
 						on_dst = self.dst / rename_from
 						on_src = self.src / rename_to
-						if not _last_bytes(on_src) == _last_bytes(on_dst):
+						try:
+							if not _last_bytes(on_src) == _last_bytes(on_dst):
+								continue
+						except OSError as e:
+							self.logger.warning(_exc_summary(e))
 							continue
 
 					src_only_relpaths.remove(rename_to)
@@ -1218,11 +1222,13 @@ def _relative_to(path:PathType, root:PathType) -> PathType:
 	else:
 		return path.relative_to(cast(RemotePath, root))
 
-def _last_bytes(file_path:Path, n:int = 1024) -> bytes:
+def _last_bytes(file:PathType, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''
 
-	file_size = file_path.stat().st_size
+	file_size = file.stat().st_size
+	if file_size is None:
+		raise OSError(f"Could not get file size: {file}")
 	bytes_to_read = file_size if n > file_size else n
-	with file_path.open("rb") as f:
+	with file.open("rb") as f:
 		f.seek(-bytes_to_read, os.SEEK_END)
 		return f.read()

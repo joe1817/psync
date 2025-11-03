@@ -8,7 +8,7 @@ import shutil
 import logging
 import tempfile
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath, PurePosixPath
 from itertools import islice
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -69,6 +69,8 @@ class Operation:
 		out_path = None
 
 		if isinstance(self, CreateFileOperation):
+			in_path = self.dst
+		if isinstance(self, CreateSymlinkOperation):
 			in_path = self.dst
 		elif isinstance(self, RenameFileOperation):
 			in_path = self.target
@@ -186,6 +188,78 @@ class DeleteDirOperation(Operation):
 		except OSError as e:
 			raise DirDeleteError(_exc_summary(e)) from e
 
+@dataclass(frozen=True)
+class CreateSymlinkOperation(Operation):
+	name = "Create Symlink"
+
+	def __post_init__(self):
+		assert self.src is not None # symlink file
+		assert self.target is None
+
+	def perform(self, sync:"Sync"):
+		assert self.src is not None
+		st = self.src.stat()
+
+		target:str|None
+		if isinstance(self.src, Path):
+			target = os.readlink(self.src)
+			if target is None:
+				raise OSError(f"Broken Symlink: {self.src}")
+			if os.name == "nt" and (target.startswith("\\\\?\\") or target.startswith("\\??\\")):
+				target = target[4:]
+		else:
+			assert isinstance(self.src, RemotePath)
+			target = RemotePath.readlink(self.src)
+			if target is None:
+				raise OSError(f"Broken Symlink: {self.src}")
+
+		assert target is not None
+
+		if sync.translate_symlinks:
+			in_sep  = RemotePath.sep(self.src) if isinstance(self.src, RemotePath) else os.sep
+			out_sep = RemotePath.sep(self.dst) if isinstance(self.dst, RemotePath) else os.sep
+
+			src_path    : PurePath
+			dst_path    : PurePath
+			target_path : PurePath
+
+			# convert target, src_path to in_sep
+			if in_sep == "\\":
+				target_path = PureWindowsPath(target)
+				if isinstance(sync.src, Path):
+					src_path = PureWindowsPath(_convert_pathsep(str(sync.src), os.sep, "\\"))
+				else:
+					src_path = PureWindowsPath(_convert_pathsep(str(sync.src), "/", "\\"))
+			else:
+				target_path = PurePosixPath(target)
+				if isinstance(sync.src, Path):
+					src_path = PurePosixPath(_convert_pathsep(str(sync.src), os.sep, "/"))
+				else:
+					src_path = PurePosixPath(_convert_pathsep(str(sync.src), "/", "/"))
+
+			# convert dst_path to out_sep
+			if out_sep == "\\":
+				if isinstance(sync.dst, Path):
+					dst_path = PureWindowsPath(_convert_pathsep(str(sync.dst), os.sep, "\\"))
+				else:
+					dst_path = PureWindowsPath(_convert_pathsep(str(sync.dst), "/", "\\"))
+			else:
+				if isinstance(sync.dst, Path):
+					dst_path = PurePosixPath(_convert_pathsep(str(sync.dst), os.sep, "/"))
+				else:
+					dst_path = PurePosixPath(_convert_pathsep(str(sync.dst), "/", "/"))
+
+			if target_path.is_relative_to(src_path):
+				# translate absolute paths
+				rel_target = target_path.relative_to(src_path)
+				rel_target = _convert_pathsep(str(rel_target), in_sep, out_sep)
+				target_path = dst_path / rel_target
+			else:
+				# translate relative paths
+				target_path = _convert_pathsep(str(target_path), in_sep, out_sep)
+
+		_create_symlink(self.dst, target=str(target_path), st=st)
+
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
 
@@ -293,6 +367,7 @@ class Sync:
 		"force_update",
 		"metadata_only",
 		"rename_threshold",
+		"translate_symlinks",
 		"ignore_symlinks",
 		"follow_symlinks",
 		"dry_run",
@@ -312,6 +387,7 @@ class Sync:
 			dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
 
 			filter   (str or Filter) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. (Defaults to "+ **/*", which searches all directories and copies all files.)
+			translate_symlinks (bool) : Whether to copy symbolic links literally, without translation to the dst system. (Defaults to `True`.)
 			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
 			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
 
@@ -348,6 +424,7 @@ class Sync:
 		self._force_update     : bool = False
 		self._metadata_only    : bool = False
 		self._rename_threshold : int|None = 10000
+		self._translate_symlinks : bool = True
 		self._ignore_symlinks  : bool = False
 		self._follow_symlinks  : bool = False
 		self._dry_run          : bool = False
@@ -624,6 +701,19 @@ class Sync:
 		if not isinstance(val, int):
 			raise TypeError(f"Bad type for arg 'rename_threshold' (expected int): {val}")
 		self._rename_threshold = val
+
+	@property
+	def translate_symlinks(self) -> bool:
+		return self._translate_symlinks
+
+	@translate_symlinks.setter
+	def translate_symlinks(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'translate_symlinks' (expected bool): {val}")
+		self._translate_symlinks = val
 
 	@property
 	def ignore_symlinks(self) -> bool:
@@ -1152,12 +1242,23 @@ class Sync:
 							summary   = f"+ {parent_dir}{display_sep}"
 						)
 					dst_dir_size[parent_dir] += 1
-				yield CreateFileOperation(
-					src       = self.src / src_relpath,
-					dst       = self.dst / src_relpath,
-					byte_diff = src_meta[src_norm_relpath].size,
-					summary   = f"+ {src_relpath}"
-				)
+
+				src = self.src / src_relpath
+				dst = self.dst / src_relpath
+				if not self.follow_symlinks and src.is_symlink():
+					yield CreateSymlinkOperation(
+						src       = src,
+						dst       = dst,
+						byte_diff = 0,
+						summary   = f"+ {src_relpath}"
+					)
+				else:
+					yield CreateFileOperation(
+						src       = src,
+						dst       = dst,
+						byte_diff = src_meta[src_norm_relpath].size,
+						summary   = f"+ {src_relpath}"
+					)
 				# No need to update dir size anymore
 
 		# Update files that have newer mtimes
@@ -1207,7 +1308,7 @@ class Sync:
 			FOOTER  = _RecordTag.FOOTER.dict()
 			SYNC_OP = _RecordTag.SYNC_OP.dict()
 
-			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.no_create=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
+			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.no_create=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.translate_symlinks=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
 			self.logger.debug("")
 
 			width = max(len(str(self.src)), len(str(self.dst)), 7) + 3
@@ -1304,6 +1405,39 @@ def _copy(src:PathType, dst:PathType, *, exist_ok:bool = True, follow_symlinks:b
 	finally:
 		dst_tmp.unlink(missing_ok=True)
 
+def _create_symlink(dst:PathType, *, target:str, st, exist_ok:bool = True) -> None:
+	if dst.exists():
+		if not exist_ok:
+			raise FileExistsError(f"Cannot create symlink, dst exists: {dst}")
+		elif not dst.is_symlink():
+			raise FileExistsError(f"Cannot create symlink, dst is not a symlink: {dst}")
+
+	dst_tmp = dst.with_name(dst.name + ".tempcopy")
+	try:
+		# Copy into a temp file, with metadata
+		dir = dst.parent
+		dir.mkdir(parents=True, exist_ok=True)
+		if isinstance(dst_tmp, Path):
+			os.symlink(target, dst_tmp, target_is_directory=stat.S_ISDIR(st.st_mode))
+		else:
+			RemotePath.symlink(target, dst_tmp)
+		# repalce the temp file
+		_replace(dst_tmp, dst)
+	finally:
+		dst_tmp.unlink(missing_ok=True)
+
+	# update time metadata
+	if st.st_atime is not None and st.st_mtime is not None:
+			if isinstance(dst, Path):
+				try:
+					os.utime(str(dst), (st.st_atime, st.st_mtime), follow_symlinks=False)
+				except NotImplementedError:
+					raise MetadataUpdateError(f"Could not update time metadata: {dst}")
+			else:
+				RemotePath._utime(dst, st=st, follow_symlinks=False)
+	else:
+		raise MetadataUpdateError(f"Could not update time metadata: {dst}")
+
 def _move(src:PathType, dst:PathType, *, exist_ok:bool = False) -> None:
 	'''Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
@@ -1370,3 +1504,34 @@ def _last_bytes(file:PathType, n:int = 1024) -> bytes:
 	with file.open("rb") as f:
 		f.seek(-bytes_to_read, os.SEEK_END)
 		return f.read()
+
+def _convert_pathsep(path:str, in_sep:str, out_sep:str):
+	r'''
+	Translates `in_sep` (path separators) in  `path` to `out_sep`.
+
+	>>> _convert_pathsep("\\a/b", "/", "\\")
+	Traceback (most recent call last):
+	...
+	OSError: Incompatible path for this system: \a/b
+	>>> _convert_pathsep("a/b", "/", "\\")
+	'a\\b'
+	>>> _convert_pathsep("\\a/b", "\\", "/")
+	'/a/b'
+	>>> _convert_pathsep("\\a/b", "/", "/")
+	'\\a/b'
+	>>> _convert_pathsep("\\a/b", "\\", "\\")
+	'\\a\\b'
+	'''
+
+	if in_sep == out_sep:
+		if in_sep == "/":
+			return path
+		else:
+			return path.replace("/", "\\")
+	elif in_sep == "\\":
+		return path.replace("\\", "/")
+	else:
+		if "\\" in path:
+			raise OSError(f"Incompatible path for this system: {path}")
+		else:
+			return path.replace("/", "\\")

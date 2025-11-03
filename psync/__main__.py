@@ -26,6 +26,7 @@ class _ArgParser:
 	parser.add_argument("-H", "--ignore-hidden", action="store_true", default=False, help="Ignore hidden files by default in glob patterns. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
 	parser.add_argument("-I", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
 
+	parser.add_argument("--no-symlink-translation", action="store_true", default=False, help="Symbolic links will be copied literally, without translation to the dst system.")
 	symlink_handling = parser.add_mutually_exclusive_group()
 	symlink_handling.add_argument("-L", "--ignore-symlinks", action="store_true", default=False, help="Ignore symbolic links under 'src' and 'dst'. Note that 'src' and 'dst' themselves will be followed regardless of this flag.")
 	symlink_handling.add_argument("--follow-symlinks", action="store_true", default=False, help="Follow symbolic links under 'src' and 'dst'. Note that 'src' and 'dst' themselves will be followed regardless of this flag.")
@@ -101,6 +102,7 @@ def main(args:list[str]) -> None:
 				parsed_args.dst,
 
 				filter           = parsed_args.filter,
+				translate_symlinks = not parsed_args.no_symlink_translation,
 				ignore_symlinks  = parsed_args.ignore_symlinks,
 				follow_symlinks  = parsed_args.follow_symlinks,
 

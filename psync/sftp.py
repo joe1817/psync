@@ -29,6 +29,7 @@ class RemotePath:
 
 	ssh_connections :dict[str, paramiko.client.SSHClient] = {}
 	sftp_connections:dict[str, paramiko.sftp_client.SFTPClient] = {}
+	is_linux        :dict[str, bool] = {}
 
 	@classmethod
 	def create(cls, s:str, timeout=10) -> "RemotePath":
@@ -145,18 +146,6 @@ class RemotePath:
 		else:
 			target = connection.readlink(str(src))
 			if target:
-				# TODO Absolute path symlinks can be updated if src_root and dst_root are known
-				#try:
-				#	if posixpath.commonpath([target, src_root]):
-				#		target = posixpath.join(dst_root, posixpath.relpath(target, src_root))
-				#except ValueError:
-				#	# target is a relative path or is on different drive from src_root
-				#	pass
-				if os.sep == "\\":
-					if os.path.isreserved(target) or "\\" in target:
-						raise OSError(f"Symlink has incompatible target: {src} -> {target}")
-					else:
-						target = target.replace("/", os.sep)
 				os.symlink(target, str(dst), target_is_directory=src.is_dir())
 			else:
 				raise OSError(f"Broken symlink: {src}")
@@ -181,27 +170,61 @@ class RemotePath:
 		if follow_symlinks or not src.is_symlink():
 			connection.put(str(src), str(dst))
 		else:
-			target = os.readlink(str(src)).replace(os.sep, "/")
+			target = os.readlink(str(src))
+			if os.sep == "\\" and (target.startswith("\\\\?\\") or target.startswith("\\??\\")):
+				target = target[4:]
 			if target:
 				connection.symlink(target, str(dst))
 			else:
 				raise OSError(f"Broken symlink: {src}")
 
-		if st.st_atime is not None and st.st_mtime is not None:
-			if follow_symlinks:
-				connection.utime(str(dst), (st.st_atime, st.st_mtime))
-			else:
-				mtime_epoch = int(st.st_mtime)
-				new_mtime = time.strftime("%Y%m%d%H%M.%S", time.localtime(mtime_epoch))
-				# touch -h changes the link times, not the target
-				command = f"touch -h -m -t {new_mtime} {str(dst)}"
-				ssh = RemotePath.ssh_connections[dst.conn_details]
-				stdin, stdout, stderr = ssh.exec_command(command)
-				error = stderr.read().decode().strip()
-				if error:
-					raise MetadataUpdateError(f"Could not update time metadata: {dst}")
+		RemotePath._utime(dst, st=st, follow_symlinks=follow_symlinks)
+
+	@classmethod
+	def sep(cls, src:"RemotePath") -> str:
+		try:
+			is_linux = RemotePath.is_linux[src.conn_details]
+		except KeyError:
+			ssh = RemotePath.ssh_connections[src.conn_details]
+			stdin, stdout, stderr = ssh.exec_command("uname -a")
+			error = stderr.read().decode().strip()
+			is_linux = not bool(error)
+			RemotePath.is_linux[src.conn_details] = is_linux
+		return "/" if is_linux else "\\"
+
+	@classmethod
+	def readlink(cls, src:"RemotePath") -> str|None:
+		connection = RemotePath.sftp_connections[src.conn_details]
+		return connection.readlink(str(src))
+
+	@classmethod
+	def symlink(cls, target:str, dst:"RemotePath") -> None:
+		'''Create a symlink at `dst` targeting `target`.'''
+
+		if target:
+			connection = RemotePath.sftp_connections[dst.conn_details]
+			connection.symlink(target, str(dst))
 		else:
+			raise OSError(f"Broken symlink: {dst}")
+
+	@classmethod
+	def _utime(cls, dst:"RemotePath", *, st, follow_symlinks:bool) -> None:
+		if st.st_atime is None or st.st_mtime is None:
 			raise MetadataUpdateError(f"Could not update time metadata: {dst}")
+
+		if follow_symlinks:
+			connection = RemotePath.sftp_connections[dst.conn_details]
+			connection.utime(str(dst), (st.st_atime, st.st_mtime))
+		else:
+			mtime_epoch = int(st.st_mtime)
+			new_mtime = time.strftime("%Y%m%d%H%M.%S", time.localtime(mtime_epoch))
+			# touch -h changes the link times, not the target
+			command = f"touch -h -m -t {new_mtime} {str(dst)}"
+			ssh = RemotePath.ssh_connections[dst.conn_details]
+			stdin, stdout, stderr = ssh.exec_command(command)
+			error = stderr.read().decode().strip()
+			if error:
+				raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 
 	connection:paramiko.sftp_client.SFTPClient
 

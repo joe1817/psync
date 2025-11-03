@@ -1212,23 +1212,8 @@ def _copy(src:PathType, dst:PathType, *, exist_ok:bool = True, follow_symlinks:b
 			shutil.copy2(src, dst_tmp, follow_symlinks=follow_symlinks)
 		else:
 			RemotePath.copy_file(src, dst_tmp, follow_symlinks=follow_symlinks)
-
-		try:
-			# Replace the dst file with the tmp file
-			_replace(dst_tmp, dst)
-		except PermissionError as e:
-			# Remove read-only flag and try again
-			make_readonly = False
-			try:
-				dst_stat = dst.stat()
-				if dst_stat.st_mode is None or not (dst_stat.st_mode & stat.S_IREAD):
-					raise e
-				dst.chmod(stat.S_IWRITE, follow_symlinks=False)
-				make_readonly = True
-				_replace(dst_tmp, dst)
-			finally:
-				if make_readonly:
-					dst.chmod(stat.S_IREAD, follow_symlinks=False)
+		# repalce the temp file
+		_replace(dst_tmp, dst)
 	finally:
 		dst_tmp.unlink(missing_ok=True)
 
@@ -1255,12 +1240,31 @@ def _move(src:PathType, dst:PathType, *, exist_ok:bool = False) -> None:
 	dir.mkdir(exist_ok=True, parents=True)
 	_replace(src, dst)
 
-# this is just needed to stop mypy from complaining
 def _replace(src:PathType, dst:PathType) -> None:
-	if isinstance(src, Path):
-		src.replace(cast(Path, dst))
-	else:
-		src.replace(cast(RemotePath, dst))
+	'''Move file from `src` to `dst`. Existing files will be overwritten..'''
+
+	try:
+		# Replace the dst file with the tmp file
+		if isinstance(src, Path):
+			src.replace(cast(Path, dst))
+		else:
+			src.replace(cast(RemotePath, dst))
+	except PermissionError as e:
+		# Remove read-only flag and try again
+		make_readonly = False
+		try:
+			dst_stat = dst.stat()
+			if dst_stat.st_mode is None or not (dst_stat.st_mode & stat.S_IREAD):
+				raise e
+			dst.chmod(stat.S_IWRITE, follow_symlinks=False)
+			make_readonly = True
+			if isinstance(src, Path):
+				src.replace(cast(Path, dst))
+			else:
+				src.replace(cast(RemotePath, dst))
+		finally:
+			if make_readonly:
+				dst.chmod(stat.S_IREAD, follow_symlinks=False)
 
 # this is just needed to stop mypy from complaining
 def _relative_to(path:PathType, root:PathType) -> PathType:

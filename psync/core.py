@@ -858,6 +858,7 @@ class Sync:
 			self.logger.debug(f"scanning: {dir}")
 
 			dir_relpath = str(_relative_to(dir, root))
+			dir_relpath = "" if dir_relpath == "." else dir_relpath # "" works better with os.path.dirname
 			normed_dir_relpath = dir_relpath
 			if convert_sep:
 				normed_dir_relpath = normed_dir_relpath.replace("\\", "/")
@@ -865,8 +866,7 @@ class Sync:
 			if not self.sftp_compat:
 				normed_dir_relpath = os.path.normcase(normed_dir_relpath)
 
-			# empty directory
-			if dir_relpath != "." and filter(root, dir_relpath + display_sep):
+			if filter(root, dir_relpath + display_sep) or dir_relpath == "":
 				yield _Dir(
 					path         = root / dir_relpath,
 					relpath      = dir_relpath,

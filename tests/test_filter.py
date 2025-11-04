@@ -11,7 +11,7 @@ logger = logging.getLogger("psync.tests")
 
 class TestFilter(unittest.TestCase):
 
-	def test_filter(self):
+	def test_pathfilter__basic(self):
 		f = filter.PathFilter(r"+ **")
 		self.assertTrue(f.filter(None, "a"))
 		self.assertTrue(f.filter(None, "a/b"))
@@ -74,23 +74,6 @@ class TestFilter(unittest.TestCase):
 		self.assertFalse(f.filter(None, "storage.sqlite"))
 		self.assertFalse(f.filter(None, "storage/"))
 
-		f = filter.PathFilter("'**/a b' \"**/A B\" **/'x y'  Joe\\'s\\ File")
-		self.assertTrue(f.filter(None, "**/a b"))
-		self.assertFalse(f.filter(None, "a b"))
-		self.assertFalse(f.filter(None, "1/2/a b"))
-		self.assertTrue(f.filter(None, "A B"))
-		self.assertTrue(f.filter(None, "1/2/A B"))
-		self.assertTrue(f.filter(None, "x y"))
-		self.assertTrue(f.filter(None, "1/2/x y"))
-		self.assertTrue(f.filter(None, "Joe's File"))
-		self.assertFalse(f.filter(None, "a"))
-
-		f = filter.PathFilter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
-		self.assertTrue(f.filter(None, "'a'"))
-		self.assertTrue(f.filter(None, "\"b\""))
-		self.assertTrue(f.filter(None, "x 1y ?"))
-		self.assertFalse(f.filter(None, "x 1y 2"))
-
 		f = filter.PathFilter(r"+ * - a/ b/a/ + b/*/ - **/x + ?/**/* - **/*")
 		self.assertTrue(f.filter(None, "a"))
 		self.assertTrue(f.filter(None, "b/a"))
@@ -103,23 +86,94 @@ class TestFilter(unittest.TestCase):
 		self.assertTrue(f.filter(None, "b/b/y"))
 		self.assertFalse(f.filter(None, "aa/y"))
 
-		f = filter.PathFilter(r"+ a B - A b c + **/*", ignore_hidden=True, ignore_case=True)
+	def test_pathfilter__quotes(self):
+		f = filter.PathFilter("'**/a b'   \"**/A B\"   **/'x y'")
+		self.assertTrue(f.filter(None, "**/a b"))
+		self.assertFalse(f.filter(None, "a b"))
+		self.assertFalse(f.filter(None, "1/2/a b"))
+		self.assertTrue(f.filter(None, "A B"))
+		self.assertTrue(f.filter(None, "1/2/A B"))
+		self.assertTrue(f.filter(None, "x y"))
+		self.assertTrue(f.filter(None, "1/2/x y"))
+		self.assertFalse(f.filter(None, "a"))
+
+		f = filter.PathFilter("\"'a'\"   '\"b\"'   \"x ?\"'y ?' ")
+		self.assertTrue(f.filter(None, "'a'"))
+		self.assertTrue(f.filter(None, "\"b\""))
+		self.assertTrue(f.filter(None, "x 1y ?"))
+		self.assertFalse(f.filter(None, "x 1y 2"))
+
+	def test_pathfilter__escapes(self):
+		f = filter.PathFilter("Joe\\'s\\ File")
+		self.assertTrue(f.filter(None, "Joe's File"))
+
+	def test_pathfilter__case(self):
+		f = filter.PathFilter(r"+ a B - A b c + **/*", ignore_case=True)
 		self.assertTrue(f.filter(None, "a"))
 		self.assertTrue(f.filter(None, "A"))
 		self.assertTrue(f.filter(None, "b"))
 		self.assertTrue(f.filter(None, "B"))
 		self.assertFalse(f.filter(None, "c"))
 		self.assertFalse(f.filter(None, "C"))
+
+	def test_pathfilter__hidden(self):
+		f = filter.PathFilter("a b/c .d", ignore_hidden=True)
+		self.assertTrue(f.filter(None, "a"))
 		self.assertFalse(f.filter(None, ".a"))
-		self.assertFalse(f.filter(None, ".A"))
-		self.assertFalse(f.filter(None, "d/.a"))
-		self.assertFalse(f.filter(None, "d/.A"))
+		self.assertTrue(f.filter(None, "b/c"))
+		self.assertFalse(f.filter(None, ".b/c"))
+		self.assertFalse(f.filter(None, "b/.c"))
+		self.assertTrue(f.filter(None, ".d"))
 
-		f = filter.PathFilter(r"./a/ ./a/b")
+	def test_pathfilter__relpaths(self):
+		f = filter.PathFilter("./0 a/ b/ ./1 c/ c/d/ ./2")
+		self.assertTrue(f.filter(None, "0"))
+		self.assertFalse(f.filter(None, "1"))
+		self.assertTrue(f.filter(None, "a/1"))
+		self.assertTrue(f.filter(None, "b/1"))
+		self.assertTrue(f.filter(None, "a/2"))
+		self.assertTrue(f.filter(None, "b/2"))
+		self.assertFalse(f.filter(None, "c/1"))
+		self.assertTrue(f.filter(None, "a/2"))
+		self.assertTrue(f.filter(None, "b/2"))
+		self.assertTrue(f.filter(None, "c/2"))
+		self.assertFalse(f.filter(None, "c/3"))
+		self.assertTrue(f.filter(None, "c/d/2"))
+		self.assertFalse(f.filter(None, "d/2"))
+
+		f = filter.PathFilter("a/ - b/ + c/ d ./1 + e/ ./**/*")
+		self.assertFalse(f.filter(None, "a/1"))
+		self.assertFalse(f.filter(None, "b/1"))
+		self.assertTrue(f.filter(None, "c/1"))
+		self.assertFalse(f.filter(None, "d/1"))
+		self.assertTrue(f.filter(None, "e/e/e/1"))
+
+		f = filter.PathFilter("./a/ ./1")
 		self.assertTrue(f.filter(None, "a/"))
-		self.assertTrue(f.filter(None, "a/b"))
-		self.assertFalse(f.filter(None, "c"))
+		self.assertTrue(f.filter(None, "1"))
+		self.assertFalse(f.filter(None, "a/1"))
 
+	def test_pathfilter__hyphen(self):
+		f = filter.PathFilter(r"'-'")
+		self.assertTrue(f.filter(None, "-"))
+		self.assertFalse(f.filter(None, "a"))
+
+		f = filter.PathFilter("\"-\"")
+		self.assertTrue(f.filter(None, "-"))
+		self.assertFalse(f.filter(None, "a"))
+
+		f = filter.PathFilter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
+		self.assertTrue(f.filter(None, "- a"))
+		self.assertTrue(f.filter(None, "-a"))
+		self.assertTrue(f.filter(None, "--"))
+		self.assertTrue(f.filter(None, "a "))
+		self.assertTrue(f.filter(None, "a -"))
+		self.assertTrue(f.filter(None, "-"))
+		self.assertTrue(f.filter(None, "\"a"))
+		self.assertTrue(f.filter(None, "a'b"))
+		self.assertFalse(f.filter(None, "b"))
+
+	def test_pathfilter__pathseps(self):
 		f = filter.PathFilter(r"a/ a/b")
 		if os.sep == "\\":
 			self.assertTrue(f.filter(None, "a/"))
@@ -148,56 +202,22 @@ class TestFilter(unittest.TestCase):
 			self.assertTrue(f.filter(None, "a\\b"))
 			self.assertFalse(f.filter(None, "c"))
 
-		f = filter.PathFilter(r"'- a' -a -- a\  a\ - ./- \"a a\'b")
-		self.assertTrue(f.filter(None, "- a"))
-		self.assertTrue(f.filter(None, "-a"))
-		self.assertTrue(f.filter(None, "--"))
-		self.assertTrue(f.filter(None, "a "))
-		self.assertTrue(f.filter(None, "a -"))
-		self.assertTrue(f.filter(None, "-"))
-		self.assertTrue(f.filter(None, "\"a"))
-		self.assertTrue(f.filter(None, "a'b"))
-		self.assertFalse(f.filter(None, "b"))
-
-		f = filter.PathFilter(r"'-'")
-		self.assertTrue(f.filter(None, "-"))
-		self.assertFalse(f.filter(None, "a"))
-
-		f = filter.PathFilter("\"-\"")
-		self.assertTrue(f.filter(None, "-"))
-		self.assertFalse(f.filter(None, "a"))
-
+	def test_pathfilter__invalid_hyphen(self):
 		self.assertRaises(ValueError, filter.PathFilter, r"+ \-")
+
+	def test_pathfilter__invalid_quotes(self):
 		self.assertRaises(ValueError, filter.PathFilter, r"+ 'a")
-		self.assertRaises(ValueError, filter.PathFilter,  "+ a\\")
+
+	def test_pathfilter__invalid_abspath(self):
 		self.assertRaises(ValueError, filter.PathFilter,  "+ /a")
 
-		if os.sep == "\\":
-			self.assertRaises(ValueError, filter.PathFilter,  "+ \\/a")
-			self.assertRaises(ValueError, filter.PathFilter,  "+ \\\\a")
+	def test_pathfilter__invalid_escape(self):
+		self.assertRaises(ValueError, filter.PathFilter,  "+ a\\")
 
-		f = filter.PathFilter("a/ b/ ./1 c/ c/d/ ./2")
-		self.assertFalse(f.filter(None, "1"))
-		self.assertTrue(f.filter(None, "a/1"))
-		self.assertTrue(f.filter(None, "b/1"))
-		self.assertTrue(f.filter(None, "a/2"))
-		self.assertTrue(f.filter(None, "b/2"))
-		self.assertFalse(f.filter(None, "c/1"))
-		self.assertTrue(f.filter(None, "a/2"))
-		self.assertTrue(f.filter(None, "b/2"))
-		self.assertTrue(f.filter(None, "c/2"))
-		self.assertFalse(f.filter(None, "c/3"))
-		self.assertTrue(f.filter(None, "c/d/2"))
-		self.assertFalse(f.filter(None, "d/2"))
-
-		f = filter.PathFilter("a/ - b/ + c/ d ./1 + e/ ./**/*")
-		self.assertFalse(f.filter(None, "a/1"))
-		self.assertFalse(f.filter(None, "b/1"))
-		self.assertTrue(f.filter(None, "c/1"))
-		self.assertFalse(f.filter(None, "d/1"))
-		self.assertTrue(f.filter(None, "e/e/e/1"))
-
-		f = filter.PathFilter("a/b/ ./1")
-		self.assertFalse(f.filter(None, "a/1"))
-		self.assertFalse(f.filter(None, "b/1"))
-		self.assertTrue(f.filter(None, "a/b/1"))
+	def test_allfilter__basic(self):
+		f1 = filter.PathFilter("a b")
+		f2 = filter.PathFilter("b c")
+		f = filter.AllFilter(f1, f2)
+		self.assertFalse(f.filter(None, "a"))
+		self.assertTrue(f.filter(None, "b"))
+		self.assertFalse(f.filter(None, "c"))

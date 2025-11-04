@@ -338,7 +338,7 @@ class TestSync(unittest.TestCase):
 				dst_entries = sync._scandir(root = b_root),
 			))
 
-			if "nt" in os.name:
+			if os.name == "nt":
 				expected = [
 					f"- {os.path.join('b', 'empty', 'empty2') + os.sep}",
 					f"- {os.path.join('b', 'empty') + os.sep}",
@@ -399,7 +399,83 @@ class TestSync(unittest.TestCase):
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-	def test_backup(self):
+	def test_run__dry_run(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a" : "2",
+					"b" : None,
+					"c" : Path("./a"),
+					"d" : {
+						"e" : None,
+					},
+					"f": {
+					},
+				},
+				"dst": {
+					"a" : ("1", 0),
+					"g": {
+					},
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			hash_src_old = hash_directory(src)
+			hash_dst_old = hash_directory(dst)
+
+			results = core.Sync(
+				src,
+				dst,
+				trash = "auto",
+				force_update = True,
+				dry_run = True,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(dst), hash_dst_old)
+
+			results = core.Sync(
+				src,
+				dst,
+				delete_files = True,
+				force_update = True,
+				dry_run = True,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(dst), hash_dst_old)
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__no_dst(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a" : None,
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__basic(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
 			file_structure = {
@@ -450,26 +526,7 @@ class TestSync(unittest.TestCase):
 			create_file_structure(root, file_structure)
 			src = root / "src"
 			dst = root / "dst"
-			hash_src_old = hash_directory(src)
-			hash_dst_old = hash_directory(dst)
 
-			################################################################################
-
-			# test dry_run
-			self.assertFalse(hash_src_old == hash_dst_old)
-			results = core.Sync(
-				src,
-				dst,
-				trash = "auto",
-				dry_run = True,
-				print_level = 100,
-			).run()
-
-			self.assertEqual(hash_directory(dst), hash_dst_old)
-
-			################################################################################
-
-			# test basic backup
 			results = core.Sync(
 				src,
 				dst,
@@ -478,90 +535,177 @@ class TestSync(unittest.TestCase):
 			).run()
 
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
-			self.assertFalse(hash_directory(dst) == hash_dst_old)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
-			if "nt" in os.name:
+			if os.name == "nt":
 				self.assertEqual(hash_directory(results.sync.trash), hash_directory(root / "windows_expected_trash"))
 			else:
 				self.assertEqual(hash_directory(results.sync.trash), hash_directory(root / "linux_expected_trash"))
 
-			################################################################################
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-			# test backup with symlink src
-			file_structure = {
-				"src2" : root / "src",
-				"dst2" : {}
-			}
-			create_file_structure(root, file_structure)
-			src2 = root / "src2"
-			dst2 = root / "dst2"
-			hash_dst2_old = hash_directory(dst2)
-			results = core.Sync(
-				src2,
-				dst2,
-				print_level = 100,
-			).run()
-
-			self.assertTrue(results.status == core.Results.Status.COMPLETED)
-			self.assertFalse(hash_directory(dst2) == hash_dst2_old)
-			self.assertEqual(hash_directory(src2), hash_directory(dst2))
-			self.assertEqual(results[core.CreateFileOperation][0], 4)
-		assert not root.exists()
-
-		################################################################################
-
+	def test_run__basic2(self):
 		# test backup involving many overlapping file names
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
 			file_structure = {
-				"dst": {
-					"a1": {
-						"a": (None, 1)
-					},
-					"b1": {},
-					"c1": (None, 1),
-
-					"b2": {
-						"a": (None, 1)
-					},
-					"c2": {},
-					"a2": (None, 1),
-
-					"c3": {
-						"a": (None, 1)
-					},
-					"a3": {},
-					"b3": (None, 1),
-				},
 				"src": {
 					"a1": {
-						"a": None
+						"a": ""
 					},
 					"b1": {},
-					"c1": None,
+					"c1": "-",
 
 					"a2": {
-						"a": None
+						"a": ""
 					},
 					"b2": {},
-					"c2": None,
+					"c2": "",
 
 					"a3": {
-						"a": None
+						"a": ""
 					},
 					"b3": {},
-					"c3": None,
+					"c3": "",
+				},
+				"dst": {
+					"a1": {
+						"a": ("", 1)
+					},
+					"b1": {},
+					"c1": ("", 1),
+
+					"b2": {
+						"a": ("", 1)
+					},
+					"c2": {},
+					"a2": ("", 1),
+
+					"c3": {
+						"a": ("", 1)
+					},
+					"a3": {},
+					"b3": ("", 1),
 				},
 			}
 			create_file_structure(root, file_structure)
 			src = root / "src"
 			dst = root / "dst"
+
 			results = core.Sync(
 				src,
 				dst,
 				trash = "auto",
+				print_level = 10,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src, hash_mtime=True, verbose=True), hash_directory(dst, hash_mtime=True, verbose=True))
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__symlink_roots(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": root / "a",
+				"dst": root / "b",
+				"a": {
+					"a": "1",
+				},
+				"b": {
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			# follow_symlinks = False is default, but should not apply to the root dirs
+
+			results = core.Sync(
+				src,
+				dst,
+				print_level = 100,
+				follow_symlinks = False,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))
+			self.assertEqual(results[core.CreateFileOperation].success, 1)
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__symlinks_with_translation(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a": {
+						"1": None,
+					},
+					"b": Path("a/1"),
+					"c": Path(root / "src/a/1"),
+				},
+				"dst": {
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			self.assertEqual(readlink(src/"b"), os.path.join("a", "1"))
+			self.assertEqual(readlink(src/"c"), str(root / "src/a/1"))
+
+			results = core.Sync(
+				src,
+				dst,
+				translate_symlinks = True, # these symlink settings are all default
+				follow_symlinks = False,
+				ignore_symlinks = False,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src, follow_symlinks=True), hash_directory(dst, follow_symlinks=True))
+			self.assertEqual(readlink(dst/"b"), os.path.join("a", "1"))
+			self.assertEqual(readlink(dst/"c"), str(root / "dst/a/1"))
+			self.assertEqual(results[core.CreateDirOperation].success, 1)
+			self.assertEqual(results[core.CreateFileOperation].success, 1)
+			self.assertEqual(sum(results[core.CreateSymlinkOperation]), 2) # Windows will fail to update time metadata on a symlink
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__renames(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a": ("1", 1),
+					"b": ("2", 2),
+					"c": ("3", 3),
+					"d": ("3", 10),
+					"e": ("3", 10),
+					"f": ("3", 20),
+				},
+				"dst": {
+					"a2": ("1", 1),
+					"b2": ("2", 2),
+					"c2": ("3", 3),
+					"d2": ("3", 10),
+					"e2": ("3", 20),
+					"f2": ("3", 20),
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				rename_threshold = 0,
 				print_level = 100,
 			).run()
 
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
+			self.assertEqual(results[core.RenameFileOperation].success, 3)

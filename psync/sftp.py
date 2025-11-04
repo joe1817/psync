@@ -226,6 +226,46 @@ class RemotePath:
 			if error:
 				raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 
+	@classmethod
+	def walk(cls, top:"RemotePath", followlinks:bool = False) -> Iterator[tuple["RemotePath", list["RemotePath"], list["RemotePath"]]]:
+		stack        : list["RemotePath"] = [top]
+		visited_dirs : set[str]  = set()
+
+		assert not isinstance(top, str)
+
+		while stack:
+			top = stack.pop()
+
+			dirs    = []
+			nondirs = []
+
+			try:
+				with _RemotePathScanner(top) as entries:
+					for entry in entries:
+						try:
+							if followlinks:
+								is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+							else:
+								is_dir = entry.is_dir(follow_symlinks=False)
+						except OSError as e:
+							continue
+						if is_dir:
+							dirs.append(entry)
+						else:
+							nondirs.append(entry)
+			except OSError as e:
+				# top does not exist or user has no read access
+				continue
+
+			yield top, dirs, nondirs
+
+			# Traverse into sub-directories
+			for dir in reversed(dirs):
+				# in case dir symlink status changed after yield
+				new_path = top / dir.name
+				if followlinks or not new_path.is_symlink():
+					stack.append(new_path)
+
 	connection:paramiko.sftp_client.SFTPClient
 
 	def __init__(self, path:str|os.PathLike[str], conn_details:str):

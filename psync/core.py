@@ -13,7 +13,7 @@ from itertools import islice
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal, Iterator, Counter as CounterType, cast
-from collections import Counter
+from collections import Counter, namedtuple
 
 from .filter import Filter, PathFilter
 from .helpers import _reverse_dict, _human_readable_size
@@ -263,6 +263,8 @@ class CreateSymlinkOperation(Operation):
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
 
+	Counts = namedtuple("Counts", ["success", "failure"])
+
 	class Status(Enum):
 		UNKNOWN              = -1
 		COMPLETED            = 0
@@ -301,7 +303,7 @@ class Results:
 
 	def __getitem__(self, key):
 		if isinstance(key, type) and issubclass(key, Operation):
-			return (self.success_counts[key.name], self.failure_counts[key.name])
+			return Results.Counts(success=self.success_counts[key.name], failure=self.failure_counts[key.name])
 		else:
 			return self.counts[key]
 

@@ -336,19 +336,19 @@ class TestSync(unittest.TestCase):
 			actual = list(op.summary for op in sync._operations(
 				src_entries = sync._scandir(root = a_root),
 				dst_entries = sync._scandir(root = b_root),
-			))
+			) if op.summary)
 
 			if "nt" in os.name:
 				expected = [
 					f"- {os.path.join('empty', 'empty2') + os.sep}",
-					f"- empty{os.sep}",
+					f"- {os.path.join('empty') + os.sep}",
 					f"U {os.path.join('A', '1.txt')}",
 				]
 			else:
 				expected = [
 					f"R {os.path.join('a', '1.txt')} -> {os.path.join('A', '1.txt')}",
 					f"- {os.path.join('empty', 'empty2') + os.sep}"
-					f"- empty{os.sep}",
+					f"- {os.path.join('empty') + os.sep}",
 				]
 			self.assertEqual(actual, expected)
 
@@ -367,11 +367,11 @@ class TestSync(unittest.TestCase):
 			actual = list(op.summary for op in sync._operations(
 				src_entries = sync._scandir(root = a_root),
 				dst_entries = sync._scandir(root = c_root),
-			))
+			) if op.summary)
 			expected = [
 				f"T {os.path.join('aa', '1.txt')}",
-				f"- aa{os.sep}",
-				f"+ a{os.sep}",
+				f"- {os.path.join('aa') + os.sep}",
+				f"+ {os.path.join('a') + os.sep}",
 				f"+ {os.path.join('a', '1.txt')}",
 			]
 			self.assertEqual(actual, expected)

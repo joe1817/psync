@@ -327,7 +327,7 @@ class TestSync(unittest.TestCase):
 			b_root = root / "b"
 
 			sync = core.Sync(a_root, b_root)
-			sync.trash            = Path("/")
+			sync.trash            = root / "trash"
 			sync.delete_files     = False
 			sync.force_update     = False
 			sync.metadata_only    = True
@@ -336,19 +336,19 @@ class TestSync(unittest.TestCase):
 			actual = list(op.summary for op in sync._operations(
 				src_entries = sync._scandir(root = a_root),
 				dst_entries = sync._scandir(root = b_root),
-			) if op.summary)
+			))
 
 			if "nt" in os.name:
 				expected = [
-					f"- {os.path.join('empty', 'empty2') + os.sep}",
-					f"- {os.path.join('empty') + os.sep}",
-					f"U {os.path.join('A', '1.txt')}",
+					f"- {os.path.join('b', 'empty', 'empty2') + os.sep}",
+					f"- {os.path.join('b', 'empty') + os.sep}",
+					f"U {os.path.join('b', 'A', '1.txt')}",
 				]
 			else:
 				expected = [
-					f"R {os.path.join('a', '1.txt')} -> {os.path.join('A', '1.txt')}",
-					f"- {os.path.join('empty', 'empty2') + os.sep}"
-					f"- {os.path.join('empty') + os.sep}",
+					f"R {os.path.join('b', 'a', '1.txt')} -> {os.path.join('A', '1.txt')}",
+					f"- {os.path.join('b', 'empty', 'empty2') + os.sep}"
+					f"- {os.path.join('b', 'empty') + os.sep}",
 				]
 			self.assertEqual(actual, expected)
 
@@ -358,7 +358,7 @@ class TestSync(unittest.TestCase):
 			c_root = root / "c"
 
 			sync = core.Sync(a_root, c_root)
-			sync.trash            = Path("/")
+			sync.trash            = root / "trash"
 			sync.delete_files     = False
 			sync.force_update     = False
 			sync.metadata_only    = True
@@ -367,12 +367,13 @@ class TestSync(unittest.TestCase):
 			actual = list(op.summary for op in sync._operations(
 				src_entries = sync._scandir(root = a_root),
 				dst_entries = sync._scandir(root = c_root),
-			) if op.summary)
+			))
 			expected = [
-				f"T {os.path.join('aa', '1.txt')}",
-				f"- {os.path.join('aa') + os.sep}",
-				f"+ {os.path.join('a') + os.sep}",
-				f"+ {os.path.join('a', '1.txt')}",
+				f"+ {os.path.join('trash', 'aa') + os.sep}",
+				f"T {os.path.join('c', 'aa', '1.txt')}",
+				f"- {os.path.join('c', 'aa') + os.sep}",
+				f"+ {os.path.join('c', 'a') + os.sep}",
+				f"+ {os.path.join('c', 'a', '1.txt')}",
 			]
 			self.assertEqual(actual, expected)
 

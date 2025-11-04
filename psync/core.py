@@ -74,8 +74,8 @@ class Operation:
 			in_path = self.dst
 		elif isinstance(self, RenameFileOperation):
 			in_path = self.target
-		#elif isinstance(self, TrashFileOperation):
-		#	in_path = self.target
+		elif isinstance(self, TrashFileOperation):
+			in_path = self.target
 		elif isinstance(self, CreateDirOperation):
 			in_path = self.dst
 
@@ -1026,6 +1026,9 @@ class Sync:
 
 		display_sep = "/" if self.sftp_compat else os.sep
 
+		dst_root_name = self.dst.name+display_sep if self.trash else ""
+		trash_root_name = self.trash.name+display_sep if self.trash else ""
+
 		src_relpaths = {}
 		dst_relpaths = {}
 
@@ -1098,23 +1101,23 @@ class Sync:
 		self.logger.debug(f"{list(islice(src_empty_dirs, 10))=}")
 		self.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
 
-		def _automatic_dir_create_ops(norm_relpath:str):
+		def _automatic_dir_create_ops(norm_relpath:str, *, root_name:str = ""):
 			if norm_relpath and not dst_dir_size[norm_relpath]:
 				relpath = src_relpaths[norm_relpath]
 				yield CreateDirOperation(
 					dst     = self.dst / relpath,
-					summary = f"+ {relpath}{display_sep}",
+					summary = f"+ {root_name}{relpath}{display_sep}",
 				)
 				norm_relpath = os.path.dirname(norm_relpath) # should keep / separators on Windows
 				if norm_relpath:
 					dst_dir_size[norm_relpath] += 1
 
-		def _automatic_dir_delete_ops(norm_relpath:str):
+		def _automatic_dir_delete_ops(norm_relpath:str, *, root_name:str = ""):
 			while norm_relpath and norm_relpath not in src_dirs and not dst_dir_size[norm_relpath]:
 				relpath = dst_relpaths[norm_relpath]
 				yield DeleteDirOperation(
 					dst     = self.dst / relpath,
-					summary = f"- {relpath}{display_sep}",
+					summary = f"- {root_name}{relpath}{display_sep}",
 				)
 				norm_relpath = os.path.dirname(norm_relpath) # should keep / separators on Windows
 				if norm_relpath:
@@ -1124,7 +1127,7 @@ class Sync:
 		# Delete empty directories now in case any new files needs to take their places
 		dst_only_empty_dirs = dst_empty_dirs.difference(src_dirs)
 		for dst_norm_relpath in dst_only_empty_dirs:
-			yield from _automatic_dir_delete_ops(dst_norm_relpath)
+			yield from _automatic_dir_delete_ops(dst_norm_relpath, root_name=dst_root_name)
 
 		# Rename files
 		if self.rename_threshold is not None:
@@ -1164,11 +1167,11 @@ class Sync:
 					dst_only_norm_relpaths.remove(dst_norm_relpath)
 
 					parent_dir = os.path.dirname(src_norm_relpath)
-					yield from _automatic_dir_create_ops(parent_dir)
+					yield from _automatic_dir_create_ops(parent_dir, root_name=dst_root_name)
 					yield RenameFileOperation(
 						dst       = self.dst / rename_from,
 						target    = self.dst / rename_to,
-						summary   = f"R {rename_from} -> {rename_to}"
+						summary   = f"R {dst_root_name}{rename_from} -> {dst_root_name}{rename_to}"
 					)
 					parent_dir = os.path.dirname(dst_norm_relpath)
 					if parent_dir:
@@ -1177,7 +1180,7 @@ class Sync:
 					parent_dir = os.path.dirname(src_norm_relpath)
 					if parent_dir:
 						dst_dir_size[parent_dir] += 1
-					yield from _automatic_dir_delete_ops(parent_dir)
+					yield from _automatic_dir_delete_ops(parent_dir, root_name=dst_root_name)
 
 				except KeyError:
 					# dst file not a result of a rename
@@ -1190,45 +1193,41 @@ class Sync:
 				yield DeleteFileOperation(
 					dst       = self.dst / dst_relpath,
 					byte_diff = -dst_meta[dst_norm_relpath].size,
-					summary   = f"- {dst_relpath}"
+					summary   = f"- {dst_root_name}{dst_relpath}"
 				)
 				parent_dir = os.path.dirname(dst_norm_relpath)
 				if parent_dir:
 					dst_dir_size[parent_dir] -= 1
 					assert dst_dir_size[parent_dir] >= 0
-				yield from _automatic_dir_delete_ops(parent_dir)
+				yield from _automatic_dir_delete_ops(parent_dir, root_name=dst_root_name)
 
 		# Send files to trash
 		elif self.trash is not None:
 			for dst_norm_relpath in dst_only_norm_relpaths:
 				dst_relpath = dst_relpaths[dst_norm_relpath]
-				# Don't want the summary of this logged liked the others, since it takes place in the trash folder.
-				# As a result, this Operation can't be added to a list of failed Operations during the sync.
-				#parent_dir = os.path.dirname(dst_norm_relpath)
-				#if parent_dir:
-				#	if dst_dir_size[parent_dir] == 0:
-				#		yield CreateDirOperation(
-				#			dst       = self.trash / dst_relpaths[parent_dir],
-				#			summary   = f"+ {parent_dir}{display_sep}"
-				#		)
-				#	dst_dir_size[parent_dir] += 1
+				parent_dir = os.path.dirname(dst_norm_relpath)
+				if parent_dir:
+					yield CreateDirOperation(
+						dst       = self.trash / dst_relpaths[parent_dir],
+						summary   = f"+ {trash_root_name}{parent_dir}{display_sep}"
+					)
 				yield TrashFileOperation(
 					dst       = self.dst / dst_relpath,
 					target    = self.trash / dst_relpath,
-					summary   = f"T {dst_relpath}"
+					summary   = f"T {dst_root_name}{dst_relpath}"
 				)
 				parent_dir = os.path.dirname(dst_norm_relpath)
 				if parent_dir:
 					dst_dir_size[parent_dir] -= 1
 					assert dst_dir_size[parent_dir] >= 0
-				yield from _automatic_dir_delete_ops(parent_dir)
+				yield from _automatic_dir_delete_ops(parent_dir, root_name=dst_root_name)
 
 		# Create files
 		if not self.no_create:
 			for src_norm_relpath in src_only_norm_relpaths:
 				src_relpath = src_relpaths[src_norm_relpath]
 				parent_dir = os.path.dirname(src_norm_relpath)
-				yield from _automatic_dir_create_ops(parent_dir)
+				yield from _automatic_dir_create_ops(parent_dir, root_name=dst_root_name)
 				src = self.src / src_relpath
 				dst = self.dst / src_relpath
 				if not self.follow_symlinks and src.is_symlink():
@@ -1236,14 +1235,14 @@ class Sync:
 						src       = src,
 						dst       = dst,
 						byte_diff = 0,
-						summary   = f"+ {src_relpath}"
+						summary   = f"+ {dst_root_name}{src_relpath}"
 					)
 				else:
 					yield CreateFileOperation(
 						src       = src,
 						dst       = dst,
 						byte_diff = src_meta[src_norm_relpath].size,
-						summary   = f"+ {src_relpath}"
+						summary   = f"+ {dst_root_name}{src_relpath}"
 					)
 				if parent_dir:
 					dst_dir_size[parent_dir] += 1 # created file
@@ -1260,7 +1259,7 @@ class Sync:
 					src       = self.src / src_relpath,
 					dst       = self.dst / dst_relpath,
 					byte_diff = byte_diff,
-					summary   = f"U {dst_relpath}"
+					summary   = f"U {dst_root_name}{dst_relpath}"
 				)
 			elif src_time < dst_time:
 				if self.force_update:
@@ -1268,7 +1267,7 @@ class Sync:
 						src       = self.src / src_relpath,
 						dst       = self.dst / dst_relpath,
 						byte_diff = byte_diff,
-						summary   = f"U {dst_relpath}"
+						summary   = f"U {dst_root_name}{dst_relpath}"
 					)
 				else:
 					self.logger.warning(f"'src' file is older than 'dst' file, skipping update: {norm_relpath}")
@@ -1277,7 +1276,7 @@ class Sync:
 		if not self.no_create:
 			src_only_empty_dirs = src_empty_dirs.difference(dst_dirs)
 			for norm_relpath in src_only_empty_dirs:
-				yield from _automatic_dir_create_ops(norm_relpath)
+				yield from _automatic_dir_create_ops(norm_relpath, root_name=dst_root_name)
 
 	def run(self) -> Results:
 		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''

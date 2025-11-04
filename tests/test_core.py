@@ -14,6 +14,10 @@ logger = logging.getLogger("psync.tests")
 
 class TestSync(unittest.TestCase):
 
+	@classmethod
+	def setUpClass(cls):
+		core.Sync._RAISE_UNKNOWN_ERRORS = True
+
 	def test_init(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
@@ -702,6 +706,7 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
+				delete_files = True,
 				rename_threshold = 0,
 				print_level = 100,
 			).run()
@@ -709,3 +714,38 @@ class TestSync(unittest.TestCase):
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			self.assertEqual(results[core.RenameFileOperation].success, 3)
+			self.assertEqual(results[core.CreateFileOperation].success, 3)
+			self.assertEqual(results[core.DeleteFileOperation].success, 3)
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__rename_blocked(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a": ("1", 1),
+				},
+				"dst": {
+					"a": {
+						"1": None,
+					},
+					"b": ("1", 1),
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				delete_files = True,
+				rename_threshold = 0,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))
+			self.assertEqual(results[core.RenameFileOperation].success, 1)
+			self.assertEqual(results[core.DeleteFileOperation].success, 1)

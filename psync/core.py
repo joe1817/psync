@@ -355,6 +355,8 @@ class Sync:
 		        Log File: path/to/log/psync_20251015_201523.log
 	'''
 
+	_RAISE_UNKNOWN_ERRORS = False
+
 	class _SyncState(Enum):
 		INVALID    = 0
 		READY      = 1
@@ -1131,7 +1133,8 @@ class Sync:
 		for dst_norm_relpath in dst_only_empty_dirs:
 			yield from _automatic_dir_delete_ops(dst_norm_relpath, root_name=dst_root_name)
 
-		# Rename files
+		# Determine file renames
+		renames = {}
 		if self.rename_threshold is not None:
 			src_only_norm_relpath_from_meta = _reverse_dict({norm_relpath:src_meta[norm_relpath] for norm_relpath in src_only_norm_relpaths})
 			dst_only_norm_relpath_from_meta = _reverse_dict({norm_relpath:dst_meta[norm_relpath] for norm_relpath in dst_only_norm_relpaths})
@@ -1151,13 +1154,10 @@ class Sync:
 					if dst_norm_relpath is None:
 						continue
 
-					rename_from = dst_relpaths[dst_norm_relpath]
-					rename_to = src_relpaths[src_norm_relpath]
-
 					# Ignore if last 1kb do not match
 					if not self.metadata_only:
-						on_dst = self.dst / rename_from
-						on_src = self.src / rename_to
+						on_dst = self.dst / dst_relpaths[dst_norm_relpath]
+						on_src = self.src / src_relpaths[src_norm_relpath]
 						try:
 							if not _last_bytes(on_src) == _last_bytes(on_dst):
 								continue
@@ -1168,21 +1168,7 @@ class Sync:
 					src_only_norm_relpaths.remove(src_norm_relpath)
 					dst_only_norm_relpaths.remove(dst_norm_relpath)
 
-					parent_dir = os.path.dirname(src_norm_relpath)
-					yield from _automatic_dir_create_ops(parent_dir, root_name=dst_root_name)
-					yield RenameFileOperation(
-						dst       = self.dst / rename_from,
-						target    = self.dst / rename_to,
-						summary   = f"R {dst_root_name}{rename_from} -> {dst_root_name}{rename_to}"
-					)
-					parent_dir = os.path.dirname(dst_norm_relpath)
-					if parent_dir:
-						dst_dir_size[parent_dir] -= 1
-						assert dst_dir_size[parent_dir] >= 0
-					parent_dir = os.path.dirname(src_norm_relpath)
-					if parent_dir:
-						dst_dir_size[parent_dir] += 1
-					yield from _automatic_dir_delete_ops(parent_dir, root_name=dst_root_name)
+					renames[dst_norm_relpath] = src_norm_relpath
 
 				except KeyError:
 					# dst file not a result of a rename
@@ -1223,6 +1209,27 @@ class Sync:
 					dst_dir_size[parent_dir] -= 1
 					assert dst_dir_size[parent_dir] >= 0
 				yield from _automatic_dir_delete_ops(parent_dir, root_name=dst_root_name)
+
+		# Rename files
+		for dst_norm_relpath in renames:
+			src_norm_relpath = renames[dst_norm_relpath]
+			rename_from = dst_relpaths[dst_norm_relpath]
+			rename_to = src_relpaths[src_norm_relpath]
+			parent_dir = os.path.dirname(src_norm_relpath)
+			yield from _automatic_dir_create_ops(parent_dir, root_name=dst_root_name)
+			yield RenameFileOperation(
+				dst       = self.dst / rename_from,
+				target    = self.dst / rename_to,
+				summary   = f"R {dst_root_name}{rename_from} -> {dst_root_name}{rename_to}"
+			)
+			parent_dir = os.path.dirname(dst_norm_relpath)
+			if parent_dir:
+				dst_dir_size[parent_dir] -= 1
+				assert dst_dir_size[parent_dir] >= 0
+			parent_dir = os.path.dirname(src_norm_relpath)
+			if parent_dir:
+				dst_dir_size[parent_dir] += 1
+			yield from _automatic_dir_delete_ops(parent_dir, root_name=dst_root_name)
 
 		# Create files
 		if not self.no_create:
@@ -1338,6 +1345,8 @@ class Sync:
 			self.logger.critical("An unexpected error occurred.", exc_info=True)
 			self.results.status = Results.Status.INTERRUPTED_BY_ERROR
 			self.results.error = e
+			if Sync._RAISE_UNKNOWN_ERRORS:
+				raise e
 		finally:
 			self.logger.info("-" * width, extra=FOOTER)
 			for line in self.results.summary():

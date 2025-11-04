@@ -4,7 +4,7 @@
 from .core import Sync, Results, Operation, CreateFileOperation, UpdateFileOperation, RenameFileOperation, DeleteFileOperation, TrashFileOperation, CreateDirOperation, DeleteDirOperation
 from .filter import Filter, PathFilter, AllFilter
 from .sftp import RemotePath
-from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError, UnsupportedOperationError
+from .errors import MetadataUpdateError, BrokenSymlinkError, IncompatiblePathError, StateError, ImmutableObjectError, UnsupportedOperationError
 
 __all__ = [
     "Sync",
@@ -22,7 +22,8 @@ __all__ = [
 	"AllFilter",
 	"RemotePath",
 	"MetadataUpdateError",
-	"DirDeleteError",
+	"BrokenSymlinkError",
+	"IncompatiblePathError",
 	"StateError",
 	"ImmutableObjectError",
 	"UnsupportedOperationError",

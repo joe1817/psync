@@ -1,13 +1,20 @@
-class MetadataUpdateError(OSError):
+class MetadataUpdateError(PermissionError):
 	'''Indicates a problem with updating file metadata (e.g., mtime) after a successful copy.'''
-	pass
+	def init(self, strerr=None, filename=None):
+		super().__init__(self, 1, strerr, filename)
 
-class DirDeleteError(OSError):
-	'''Indicates a problem with deleting a directory.'''
-	pass
+class BrokenSymlinkError(FileNotFoundError):
+	'''Indicates a problem with a symlink's target path.'''
+	def init(self, strerr=None, filename=None):
+		super().__init__(self, 2, strerr, filename)
+
+class IncompatiblePathError(PermissionError):
+	'''Indicates a problem converting or comparing paths.'''
+	def init(self, strerr=None, filename=None):
+		super().__init__(self, 1, strerr, filename)
 
 class StateError(RuntimeError):
-	'''Indicates the object is in an invalid state for the attempted operation.'''
+	'''Indicates the object is in (or would be set to) an invalid state.'''
 	pass
 
 class ImmutableObjectError(StateError):

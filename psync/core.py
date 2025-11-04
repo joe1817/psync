@@ -20,7 +20,7 @@ from .helpers import _reverse_dict, _human_readable_size
 from .sftp import RemotePath, _RemotePathScanner
 from .watch import _LocalWatcher
 from .types import PathType, PathLikeType
-from .errors import MetadataUpdateError, DirDeleteError, StateError, ImmutableObjectError
+from .errors import MetadataUpdateError, BrokenSymlinkError, IncompatiblePathError, StateError, ImmutableObjectError, UnsupportedOperationError
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
 @dataclass(frozen=True)
@@ -183,10 +183,7 @@ class DeleteDirOperation(Operation):
 		assert self.target is None
 
 	def perform(self, sync:"Sync"):
-		try:
-			self.dst.rmdir()
-		except OSError as e:
-			raise DirDeleteError(_exc_summary(e)) from e
+		self.dst.rmdir()
 
 @dataclass(frozen=True)
 class CreateSymlinkOperation(Operation):
@@ -204,14 +201,14 @@ class CreateSymlinkOperation(Operation):
 		if isinstance(self.src, Path):
 			target = os.readlink(self.src)
 			if target is None:
-				raise OSError(f"Broken Symlink: {self.src}")
+				raise BrokenSymlinkError("Broken Symlink", str(self.src))
 			if os.name == "nt" and (target.startswith("\\\\?\\") or target.startswith("\\??\\")):
 				target = target[4:]
 		else:
 			assert isinstance(self.src, RemotePath)
 			target = RemotePath.readlink(self.src)
 			if target is None:
-				raise OSError(f"Broken Symlink: {self.src}")
+				raise BrokenSymlinkError("Broken Symlink", str(self.src))
 
 		assert target is not None
 
@@ -258,7 +255,10 @@ class CreateSymlinkOperation(Operation):
 				# translate relative paths
 				target_path = _convert_pathsep(str(target_path), in_sep, out_sep)
 
-		_create_symlink(self.dst, target=str(target_path), st=st)
+		try:
+			_create_symlink(self.dst, target=str(target_path), st=st)
+		except UnsupportedOperationError as e:
+			sync.logger.warning(_exc_summary(e))
 
 class Results:
 	'''Various statistics and other information returned by `sync()`.'''
@@ -603,7 +603,7 @@ class Sync:
 		if not isinstance(val, PathLikeType):
 			raise TypeError(f"Bad type for property 'trash' (expected {PathLikeType}): {val}")
 		if self.delete_files:
-			raise RuntimeError("Mutually exclusive properties: 'trash' and 'delete_files'")
+			raise StateError("Mutually exclusive properties: 'trash' and 'delete_files'")
 
 		trash: PathType
 		if isinstance(val, PathType):
@@ -645,7 +645,7 @@ class Sync:
 		if not isinstance(val, bool):
 			raise TypeError(f"Bad type for property 'delete_files' (expected bool): {val}")
 		if val and self.trash:
-			raise RuntimeError("Mutually exclusive properties: 'trash' and 'delete_files'")
+			raise StateError("Mutually exclusive properties: 'trash' and 'delete_files'")
 		self._delete_files = val
 
 	@property
@@ -729,7 +729,7 @@ class Sync:
 		if not isinstance(val, bool):
 			raise TypeError(f"Bad type for property 'ignore_symlinks' (expected bool): {val}")
 		if val and self.follow_symlinks:
-			raise RuntimeError("Mutually exclusive properties: 'follow_symlinks' and 'ignore_symlinks'")
+			raise StateError("Mutually exclusive properties: 'follow_symlinks' and 'ignore_symlinks'")
 		self._ignore_symlinks = val
 
 	@property
@@ -744,7 +744,7 @@ class Sync:
 		if not isinstance(val, bool):
 			raise TypeError(f"Bad type for property 'follow_symlinks' (expected bool): {val}")
 		if val and self.ignore_symlinks:
-			raise RuntimeError("Mutually exclusive properties: 'ignore_symlinks' and 'follow_symlinks'")
+			raise StateError("Mutually exclusive properties: 'ignore_symlinks' and 'follow_symlinks'")
 		self._follow_symlinks = val
 
 	@property
@@ -1370,9 +1370,9 @@ def _copy(src:PathType, dst:PathType, *, exist_ok:bool = True, follow_symlinks:b
 
 	if dst.exists():
 		if not exist_ok:
-			raise FileExistsError(f"Cannot copy, dst exists: {src} -> {dst}")
+			raise FileExistsError(17, f"Cannot copy {src}, dst exists", str(dst))
 		elif not dst.is_file():
-			raise FileExistsError(f"Cannot copy, dst is not a file: {src} -> {dst}")
+			raise FileExistsError(17, f"Cannot copy {src}, dst is not a file", str(dst))
 
 	dst_tmp = dst.with_name(dst.name + ".tempcopy")
 	try:
@@ -1391,9 +1391,9 @@ def _copy(src:PathType, dst:PathType, *, exist_ok:bool = True, follow_symlinks:b
 def _create_symlink(dst:PathType, *, target:str, st, exist_ok:bool = True) -> None:
 	if dst.exists():
 		if not exist_ok:
-			raise FileExistsError(f"Cannot create symlink, dst exists: {dst}")
+			raise FileExistsError(17, "Cannot create symlink, dst exists", str(dst))
 		elif not dst.is_symlink():
-			raise FileExistsError(f"Cannot create symlink, dst is not a symlink: {dst}")
+			raise FileExistsError(17, "Cannot create symlink, dst is not a symlink", str(dst))
 
 	dst_tmp = dst.with_name(dst.name + ".tempcopy")
 	try:
@@ -1414,21 +1414,21 @@ def _create_symlink(dst:PathType, *, target:str, st, exist_ok:bool = True) -> No
 			if isinstance(dst, Path):
 				try:
 					os.utime(str(dst), (st.st_atime, st.st_mtime), follow_symlinks=False)
-				except NotImplementedError:
-					raise MetadataUpdateError(f"Could not update time metadata: {dst}")
+				except NotImplementedError as e:
+					raise UnsupportedOperationError("Could not update time metadata", str(dst)) from e
 			else:
 				RemotePath._utime(dst, st=st, follow_symlinks=False)
 	else:
-		raise MetadataUpdateError(f"Could not update time metadata: {dst}")
+		raise PermissionError(1, "Could not update time metadata", str(dst))
 
 def _move(src:PathType, dst:PathType, *, exist_ok:bool = False) -> None:
 	'''Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
 	if dst.exists():
 		if not exist_ok:
-			raise FileExistsError(f"Cannot move, dst exists: {src} -> {dst}")
+			raise FileExistsError(17, f"Cannot move {src}, dst exists", str(dst))
 		elif not dst.is_file():
-			raise FileExistsError(f"Cannot move, dst is not a file: {src} -> {dst}")
+			raise FileExistsError(17, f"Cannot move {src}, dst is not a file", str(dst))
 
 	if isinstance(src, Path) and isinstance(dst, Path):
 		pass
@@ -1482,7 +1482,7 @@ def _last_bytes(file:PathType, n:int = 1024) -> bytes:
 
 	file_size = file.stat().st_size
 	if file_size is None:
-		raise OSError(f"Could not get file size: {file}")
+		raise PermissionError(1, "Could not get file size", str(file))
 	bytes_to_read = file_size if n > file_size else n
 	with file.open("rb") as f:
 		f.seek(-bytes_to_read, os.SEEK_END)
@@ -1495,7 +1495,7 @@ def _convert_pathsep(path:str, in_sep:str, out_sep:str):
 	>>> _convert_pathsep("\\a/b", "/", "\\")
 	Traceback (most recent call last):
 	...
-	OSError: Incompatible path for this system: \a/b
+	psync.errors.IncompatiblePathError: [Errno 1] Incompatible path for this system: '\\a/b'
 	>>> _convert_pathsep("a/b", "/", "\\")
 	'a\\b'
 	>>> _convert_pathsep("\\a/b", "\\", "/")
@@ -1515,6 +1515,6 @@ def _convert_pathsep(path:str, in_sep:str, out_sep:str):
 		return path.replace("\\", "/")
 	else:
 		if "\\" in path:
-			raise OSError(f"Incompatible path for this system: {path}")
+			raise IncompatiblePathError(1, "Incompatible path for this system", str(path))
 		else:
 			return path.replace("/", "\\")

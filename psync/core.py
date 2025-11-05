@@ -344,6 +344,7 @@ class Results:
 		lines = []
 		if self.sync.dry_run:
 			lines.append(f"Status: {status} (Dry Run)")
+			lines.append(f"Net Change: {_human_readable_size(self.byte_diff)} (Estimated)")
 		else:
 			lines.append(f"Status: {status}")
 			# keys = self.success_counts.keys()|self.failure_counts.keys()

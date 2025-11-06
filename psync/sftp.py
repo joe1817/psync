@@ -22,6 +22,7 @@ try:
 except ImportError:
 	pass
 
+from .log import logger
 from .errors import MetadataUpdateError
 
 class RemotePath:
@@ -51,6 +52,7 @@ class RemotePath:
 			ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
 			try:
+				logger.info(f"Connecting to {parsed.username}@{parsed.hostname}…")
 				ssh.connect(
 					parsed.hostname,
 					port     = parsed.port or 22,

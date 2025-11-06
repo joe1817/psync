@@ -3,6 +3,7 @@
 
 import sys
 import os
+import ntpath
 import stat
 import shutil
 import logging
@@ -16,11 +17,11 @@ from typing import Any, Literal, Iterator, Counter as CounterType, cast
 from collections import Counter, namedtuple
 
 from .filter import Filter, PathFilter
-from .helpers import _reverse_dict, _human_readable_size
+from .helpers import _reverse_dict, _human_readable_size, _merge_iters
 from .sftp import RemotePath, _RemotePathScanner
 from .watch import _LocalWatcher
 from .types import PathType, PathLikeType
-from .errors import MetadataUpdateError, BrokenSymlinkError, IncompatiblePathError, StateError, ImmutableObjectError, UnsupportedOperationError
+from .errors import MetadataUpdateError, BrokenSymlinkError, IncompatiblePathError, NewerInDstError, StateError, ImmutableObjectError, UnsupportedOperationError
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
 @dataclass(frozen=True)
@@ -30,28 +31,40 @@ class _Metadata:
 	size  : int
 	mtime : float
 
-@dataclass(frozen=True, repr=False, eq=False, unsafe_hash=False)
-class _Entry:
+class _Relpath:
 	'''Filesystem entries yielded by `_scandir()`.'''
 
-	path         : PathType
-	relpath      : str
-	norm_relpath : str # normcased and replaced \\ -> /
+	def __init__(self, relpath, in_sep, out_sys):
+		self.relpath = relpath
+		self.in_sep = in_sep
+		self.out_sys = out_sys
+
+		if out_sys == "nt":
+			if (in_sep == "/" and "\\" in relpath) or ntpath.isreserved(relpath):
+				raise IncompatiblePathError("Incompatible path for this system", str(path))
+			parts = relpath.split(in_sep)
+			self.norm = tuple(p.lower() for p in parts)
+			self.name = parts[-1]
+		else:
+			self.norm = tuple(relpath.split(in_sep))
+			self.name = self.norm[-1]
+
+		assert ".." not in self.norm
 
 	def __eq__(self, other):
-		return self.norm_relpath == other.norm_relpath
+		return self.norm == other.norm
 
 	def __hash__(self):
-		return hash(self.norm_relpath)
+		return hash(self.norm)
 
 	def __bool__(self):
-		return bool(self.norm_relpath)
+		return bool(self.relpath)
 
-	def __lt__(self, other:"_Entry"):
-		return self.norm_relpath < other.norm_relpath
+	def __lt__(self, other:"_Relpath"):
+		return self.norm < other.norm
 
-	def __contains__(self, val):
-		return val in self.relpath # TODO norm_relpath?
+	#def __contains__(self, val):
+	#	return val in self.relpath
 
 	def __str__(self):
 		return self.relpath
@@ -59,25 +72,31 @@ class _Entry:
 	def __repr__(self):
 		return self.relpath
 
+	def __add__(self, other):
+		return _Relpath(self.relpath + other, self.in_sep, self.out_sys)
+
 	def __rtruediv__(self, other:PathType):
 		return other / self.relpath
 
-	@property
-	def parent(self):
-		return _Entry(
-			path=self.path.parent,
-			relpath=os.path.dirname(self.relpath),
-			norm_relpath=os.path.dirname(self.norm_relpath)
-		)
+	def is_relative_to(self, other):
+		return all(a==b for a,b in zip(self.norm, other.norm)) or other.relpath == "."
 
-@dataclass(frozen=True, repr=False, eq=False, unsafe_hash=False)
-class _File(_Entry):
-	meta     : _Metadata
+#@dataclass(frozen=True, repr=False, eq=False, unsafe_hash=False)
+class _File(_Relpath):
+	pass
+	#meta     : _Metadata
 
-@dataclass(frozen=True, repr=False, eq=False, unsafe_hash=False)
-class _Dir(_Entry):
-	num_files    : int
-	num_dirs     : int
+class _Symlink(_File): # TODO use this to replace is_symlink() check inside _operations
+	pass
+
+#@dataclass(frozen=True, repr=False, eq=False, unsafe_hash=False)
+class _Dir(_Relpath):
+	pass
+	#num_files    : int
+	#num_dirs     : int
+
+	#def __len__(self):
+	#	return self.num_files + self.num_dirs
 
 @dataclass(frozen=True)
 class Operation:
@@ -86,9 +105,9 @@ class Operation:
 	name  = ""
 
 	summary   : str
-	dst       : PathType
-	src       : PathType | None = None
-	target    : PathType | None = None
+	dst       : _Relpath
+	src       : _Relpath | None = None
+	target    : _Relpath | None = None
 	byte_diff : int = 0
 
 	def perform(self, sync:"Sync"):
@@ -125,13 +144,10 @@ class Operation:
 		if in_path is None or out_path is None:
 			return False
 		else:
-			if isinstance(in_path, Path):
-				assert isinstance(out_path, Path)
-				return in_path.is_relative_to(out_path)
-			else:
-				assert isinstance(in_path, Path)
-				assert isinstance(out_path, Path)
-				return in_path.is_relative_to(out_path)
+			return in_path.is_relative_to(out_path)
+
+	def __lt__(self, other):
+		return self.dst < other.dst
 
 	def __str__(self):
 		return self.summary
@@ -146,9 +162,7 @@ class CreateFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.src is not None
-		assert self.src.is_relative_to(sync.src)
-		assert self.dst.is_relative_to(sync.dst)
-		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
+		_copy(sync.src / self.src, sync.dst / self.dst, follow_symlinks=sync.follow_symlinks)
 
 @dataclass(frozen=True)
 class UpdateFileOperation(Operation):
@@ -160,9 +174,7 @@ class UpdateFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.src is not None
-		assert self.src.is_relative_to(sync.src)
-		assert self.dst.is_relative_to(sync.dst)
-		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
+		_copy(sync.src / self.src, sync.dst / self.dst, follow_symlinks=sync.follow_symlinks)
 
 @dataclass(frozen=True)
 class RenameFileOperation(Operation):
@@ -174,9 +186,8 @@ class RenameFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.target is not None
-		assert self.dst.is_relative_to(sync.dst)
-		assert self.target.is_relative_to(sync.dst)
-		_move(self.dst, self.target)
+		# TODO two-step if Windows and only changing case
+		_move(sync.dst / self.dst, sync.dst / self.target)
 
 @dataclass(frozen=True)
 class DeleteFileOperation(Operation):
@@ -186,9 +197,13 @@ class DeleteFileOperation(Operation):
 		assert self.src is None
 		assert self.target is None
 
+	def __lt__(self, other):
+		if self.dst.is_relative_to(other.dst):
+			return True
+		return self.dst < other.dst
+
 	def perform(self, sync:"Sync"):
-		assert self.dst.is_relative_to(sync.dst)
-		self.dst.unlink()
+		(sync.dst / self.dst).unlink()
 
 @dataclass(frozen=True)
 class TrashFileOperation(Operation):
@@ -196,13 +211,51 @@ class TrashFileOperation(Operation):
 
 	def __post_init__(self):
 		assert self.src is None
-		assert self.target is not None
+		assert self.target is None
+
+	def __lt__(self, other):
+		if self.dst.is_relative_to(other.dst):
+			return True
+		return self.dst < other.dst
 
 	def perform(self, sync:"Sync"):
-		assert self.target is not None
-		assert self.dst.is_relative_to(sync.dst)
-		assert self.target.is_relative_to(sync.trash)
-		_move(self.dst, self.target)
+		assert self.target is None
+		assert sync.trash is not None
+		_move(sync.dst / self.dst, sync.trash / self.dst)
+
+@dataclass(frozen=True)
+class TrashDirOperation(Operation):
+	name = "Create Dir"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is None
+
+	def __lt__(self, other):
+		if self.dst.is_relative_to(other.dst):
+			return True
+		return self.dst < other.dst
+
+	def perform(self, sync:"Sync"):
+		assert sync.trash is not None
+		(sync.trash / self.dst).mkdir(exist_ok=True, parents=True)
+		(sync.dst / self.dst).rmdir()
+
+@dataclass(frozen=True)
+class DeleteDirOperation(Operation):
+	name = "Delete Dir"
+
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is None
+
+	def __lt__(self, other):
+		if self.dst.is_relative_to(other.dst):
+			return True
+		return self.dst < other.dst
+
+	def perform(self, sync:"Sync"):
+		(sync.dst / self.dst).rmdir()
 
 @dataclass(frozen=True)
 class CreateDirOperation(Operation):
@@ -213,20 +266,7 @@ class CreateDirOperation(Operation):
 		assert self.target is None
 
 	def perform(self, sync:"Sync"):
-		assert self.dst.is_relative_to(sync.dst) or (sync.trash and self.dst.is_relative_to(sync.trash))
-		self.dst.mkdir(exist_ok=True, parents=True)
-
-@dataclass(frozen=True)
-class DeleteDirOperation(Operation):
-	name = "Delete Dir"
-
-	def __post_init__(self):
-		assert self.src is None
-		assert self.target is None
-
-	def perform(self, sync:"Sync"):
-		assert self.dst.is_relative_to(sync.dst)
-		self.dst.rmdir()
+		(sync.dst / self.dst).mkdir(exist_ok=True, parents=True)
 
 @dataclass(frozen=True)
 class CreateSymlinkOperation(Operation):
@@ -238,70 +278,73 @@ class CreateSymlinkOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.src is not None
-		assert self.src.is_relative_to(sync.src)
-		assert self.dst.is_relative_to(sync.dst)
-		st = self.src.stat()
+
+		src = sync.src / self.src
+		dst = sync.dst / self.dst
+
+		st = src.stat()
 
 		target:str|None
-		if isinstance(self.src, Path):
-			target = os.readlink(self.src)
+		if isinstance(src, Path):
+			target = os.readlink(src)
 			if target is None:
-				raise BrokenSymlinkError("Broken Symlink", str(self.src))
+				raise BrokenSymlinkError("Broken Symlink", str(src))
 			if os.name == "nt" and (target.startswith("\\\\?\\") or target.startswith("\\??\\")):
 				target = target[4:]
 		else:
-			assert isinstance(self.src, RemotePath)
-			target = RemotePath.readlink(self.src)
+			assert isinstance(src, RemotePath)
+			target = RemotePath.readlink(src)
 			if target is None:
-				raise BrokenSymlinkError("Broken Symlink", str(self.src))
+				raise BrokenSymlinkError("Broken Symlink", str(src))
 
 		assert target is not None
 
 		if sync.translate_symlinks:
-			in_sep  = RemotePath.sep(self.src) if isinstance(self.src, RemotePath) else os.sep
-			out_sep = RemotePath.sep(self.dst) if isinstance(self.dst, RemotePath) else os.sep
-
 			src_path    : PurePath
 			dst_path    : PurePath
 			target_path : PurePath
 
-			# convert target, src_path to in_sep
-			if in_sep == "\\":
+			# convert target, src_path to sync.in_sep
+			if sync.in_sys == "nt":
 				target_path = PureWindowsPath(target)
-				if isinstance(sync.src, Path):
-					src_path = PureWindowsPath(_convert_pathsep(str(sync.src), os.sep, "\\"))
+				if sync.in_sep == "\\":
+					src_path = PureWindowsPath(_convert_sep(str(sync.src), "\\", "\\"))
 				else:
-					src_path = PureWindowsPath(_convert_pathsep(str(sync.src), "/", "\\"))
+					src_path = PureWindowsPath(_convert_sep(str(sync.src), "/", "\\"))
 			else:
 				target_path = PurePosixPath(target)
-				if isinstance(sync.src, Path):
-					src_path = PurePosixPath(_convert_pathsep(str(sync.src), os.sep, "/"))
+				if sync.in_sep == "\\":
+					src_path = PurePosixPath(_convert_sep(str(sync.src), "\\", "/"))
 				else:
-					src_path = PurePosixPath(_convert_pathsep(str(sync.src), "/", "/"))
+					src_path = PurePosixPath(_convert_sep(str(sync.src), "/", "/"))
 
-			# convert dst_path to out_sep
-			if out_sep == "\\":
-				if isinstance(sync.dst, Path):
-					dst_path = PureWindowsPath(_convert_pathsep(str(sync.dst), os.sep, "\\"))
+			# convert dst_path to sync.out_sep
+			if sync.out_sys == "nt":
+				if sync.out_sep == "\\":
+					dst_path = PureWindowsPath(_convert_sep(str(sync.dst), "\\", "\\"))
 				else:
-					dst_path = PureWindowsPath(_convert_pathsep(str(sync.dst), "/", "\\"))
+					dst_path = PureWindowsPath(_convert_sep(str(sync.dst), "/", "\\"))
 			else:
-				if isinstance(sync.dst, Path):
-					dst_path = PurePosixPath(_convert_pathsep(str(sync.dst), os.sep, "/"))
+				if sync.out_sep == "\\":
+					dst_path = PurePosixPath(_convert_sep(str(sync.dst), "\\", "/"))
 				else:
-					dst_path = PurePosixPath(_convert_pathsep(str(sync.dst), "/", "/"))
+					dst_path = PurePosixPath(_convert_sep(str(sync.dst), "/", "/"))
+
+			if sync.in_sys == "linux" and sync.out_sys == "nt":
+				if ntpath.isreserved(target_path):
+					raise IncompatiblePathError("Incompatible path for dst system", str(target_path))
 
 			if target_path.is_relative_to(src_path):
 				# translate absolute paths
 				rel_target = target_path.relative_to(src_path)
-				rel_target = _convert_pathsep(str(rel_target), in_sep, out_sep)
+				rel_target = _convert_sep(str(rel_target), sync.in_sep, sync.out_sep)
 				target_path = dst_path / rel_target
 			else:
 				# translate relative paths
-				target_path = _convert_pathsep(str(target_path), in_sep, out_sep)
+				target_path = _convert_sep(str(target_path), sync.in_sep, sync.out_sep)
 
 		try:
-			_create_symlink(self.dst, target=str(target_path), st=st)
+			_create_symlink(dst, target=str(target_path), st=st)
 		except UnsupportedOperationError as e:
 			sync.logger.warning(_exc_summary(e))
 
@@ -444,7 +487,7 @@ class Sync:
 			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
 			delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst` but not `src`). Mutually exclusive with `trash`. (Defaults to `False`.)
 			no_create         (bool) : Whether to prevent the creation of any files or directories in `dst`. (Defaults to `False`.)
-			force_update      (bool) : Whether to allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
+			force_update      (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`, and it will allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
 			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
 
@@ -483,13 +526,8 @@ class Sync:
 
 		self._tmp_log_file     : PathType|None = None
 
-		# This isn't a problem because dirs are walked in their entirety before operations are performed
-		# If this changes in the furture, should also check that src or dst isn't nested in the other
-		#if src.resolve() == dst.resolve():
-		#	raise ValueError(f"'src' and 'dst' point to the same directory")
-
 		self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-		self.sftp_compat = isinstance(self.src, RemotePath) or isinstance(self.dst, RemotePath)
+		self.sftp_compat = isinstance(self.src, RemotePath) or isinstance(self.dst, RemotePath) # TODO check which uses of this should be changed to out_sep
 		self.results = Results(self)
 
 		# self.logger will handle records related to a sync operation
@@ -510,6 +548,8 @@ class Sync:
 		self.handler_stderr.setFormatter(_ConsoleFormatter())
 		self.filter_tag = _TagFilter()
 		self.handler_stdout.addFilter(self.filter_tag)
+		#assert not self.logger.handlers # TODO no idea why this fails, logger should be brand new
+		self.logger.handlers = []
 		self.logger.addHandler(self.handler_stdout)
 		self.logger.addHandler(self.handler_stderr)
 
@@ -526,7 +566,6 @@ class Sync:
 		self.results = Results(self)
 		if self._state != Sync._SyncState.INVALID:
 			self._state = Sync._SyncState.READY
-
 
 	@property
 	def src(self) -> PathType:
@@ -560,9 +599,32 @@ class Sync:
 		if not src.exists():
 			raise ValueError(f"'src' does not exist: {val}")
 
+		src = src.resolve()
+	
 		if hasattr(self, "_dst") and self.dst:
+			err = None
+			if src == self.dst:
+				err = "'src' and 'dst' connot be the same directory"
+			else:
+				try:
+					if src.is_relative_to(self.dst):
+						err = "'src' cannot be a child of 'dst'"
+				except Exception:
+					pass
+				try:
+					if self.dst.is_relative_to(src):
+						err = "'dst' cannot be a child of 'src'"
+				except Exception:
+					pass
+				if err:
+					raise ValueError(err)
 			self._state = Sync._SyncState.READY
 
+		if isinstance(src, RemotePath):
+			self.in_sys = "linux" if RemotePath.sep(src) == "/" else "nt" # TODO RemotePath.os_name, whcih may also return "darwin"
+		else:
+			self.in_sys = os.name
+		self.in_sep = "/" if isinstance(src, RemotePath) else os.sep
 		self._src = src
 
 	@property
@@ -608,9 +670,32 @@ class Sync:
 				if os.stat(self.trash).st_dev != os.stat(self.dst).st_dev:
 					raise ValueError(f"'trash' is not on the same file system as 'dst': {self.trash}")
 
+		dst = dst.resolve()
+
 		if hasattr(self, "_src") and self.src:
+			err = None
+			if self.src == dst:
+				err = "'src' and 'dst' connot be the same directory"
+			else:
+				try:
+					if self.src.is_relative_to(dst):
+						err = "'src' cannot be a child of 'dst'"
+				except Exception:
+					pass
+				try:
+					if dst.is_relative_to(self.src):
+						err = "'dst' cannot be a child of 'src'"
+				except Exception:
+					pass
+				if err:
+					raise ValueError(err)
 			self._state = Sync._SyncState.READY
 
+		if isinstance(dst, RemotePath):
+			self.out_sys = "linux" if RemotePath.sep(dst) == "/" else "nt" # TODO RemotePath.os_name, whcih may also return "darwin"
+		else:
+			self.out_sys = os.name
+		self.out_sep = "/" if isinstance(dst, RemotePath) else os.sep
 		self._dst = dst
 
 	@property
@@ -633,7 +718,7 @@ class Sync:
 			filter = val
 
 		assert isinstance(filter, Filter)
-		self._filter = filter
+		self._filter = filter # TODO convert filter based on in_sep, out_sep?
 
 	@property
 	def trash(self) -> PathType|None:
@@ -675,9 +760,12 @@ class Sync:
 			raise ValueError(f"'trash' is not a directory: {val}")
 
 		# st_dev is not available over SFTP
-		if not self.sftp_compat and trash.exists():
-			if os.stat(trash).st_dev != os.stat(self.dst).st_dev:
-				raise ValueError(f"'trash' is not on the same file system as 'dst': {trash}")
+		try:
+			if not self.sftp_compat:
+				if os.stat(trash).st_dev != os.stat(self.dst).st_dev:
+					raise ValueError(f"'trash' is not on the same file system as 'dst': {trash}")
+		except FileNotFoundError:
+			pass
 
 		self._trash = trash
 
@@ -926,33 +1014,33 @@ class Sync:
 			assert self.log_file
 			_replace(self._tmp_log_file, self.log_file)
 
-	def _walk(self, top:PathType) -> Iterator[tuple[PathType, list[os.DirEntry|RemotePath], list[os.DirEntry|RemotePath]]]:
-		stack        : list[Any] = [top]
+	def _walk(self, root:PathType) -> Iterator[tuple[PathType, list[os.DirEntry|RemotePath], list[os.DirEntry|RemotePath]]]:
+		stack        : list[Any] = [root]
 		visited_dirs : set[str]  = set()
 
-		assert not isinstance(top, str)
+		assert not isinstance(root, str)
 
 		while stack:
-			top = stack.pop()
+			parent = stack.pop()
 
 			if self.follow_symlinks:
-				if isinstance(top, str):
-					visited_dirs.remove(top)
+				if isinstance(parent, str):
+					visited_dirs.remove(parent)
 					continue
-				d = str(top.resolve())
+				d = str(parent.resolve())
 				if d in visited_dirs:
-					self.logger.warning(f"Symlink circular reference: {top} -> {d}")
+					self.logger.warning(f"Symlink circular reference: {parent} -> {d}")
 					continue
 				stack.append(d)
 				visited_dirs.add(d)
 
-			assert not isinstance(top, str)
+			assert not isinstance(parent, str)
 
-			dirs    = []
-			nondirs = []
+			dir_entries    = []
+			file_entries = []
 
 			try:
-				scanner = _RemotePathScanner(top) if isinstance(top, RemotePath) else os.scandir(top)
+				scanner = _RemotePathScanner(parent) if isinstance(parent, RemotePath) else os.scandir(parent)
 				with scanner as entries:
 					for entry in entries:
 						try:
@@ -966,69 +1054,69 @@ class Sync:
 							self.logger.warning(_exc_summary(e))
 							continue
 						if is_dir:
-							dirs.append(entry)
+							dir_entries.append(entry)
 						else:
-							nondirs.append(entry)
+							file_entries.append(entry)
 			except OSError as e:
-				# top does not exist or user has no read access
+				# parent does not exist or user has no read access
 				self.logger.warning(_exc_summary(e))
 				continue
 
-			#dirs.sort(key=lambda x: x.name)
-			#nondirs.sort(key=lambda x: x.name)
+			dir_entries.sort(key = lambda x: x.name)
+			#file_entries.sort(key = lambda x: x.name)
 
-			yield top, dirs, nondirs
+			yield parent, dir_entries, file_entries
 
 			# Traverse into sub-directories
-			for dir in reversed(dirs):
+			for d in reversed(dir_entries):
 				# in case dir symlink status changed after yield
-				new_path = top / dir.name
+				new_path = parent / d.name
 				if self.follow_symlinks or not new_path.is_symlink():
 					stack.append(new_path)
 
-	def _scandir(self, root:PathType) -> Iterator[_Entry]:
+	def _scandir(self, root:PathType) -> Iterator[tuple[_Dir, list[_Dir], list[_File], int, dict[_File, _Metadata], set[int]]]:
 		'''Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.'''
 
 		filter = self.filter.filter
+		src_root_name = root.name + self.in_sep if self.trash else ""
 
-		convert_sep = self.sftp_compat and os.name == "nt" and not isinstance(root, RemotePath)
-		display_sep = "/" if self.sftp_compat else os.sep
+		for parent, dir_entries, file_entries in self._walk(root):
+			self.logger.debug(f"scanning: {parent}")
 
-		for dir, dir_entries, file_entries in self._walk(root):
-			self.logger.debug(f"scanning: {dir}")
+			dir_size = len(file_entries) + len(dir_entries)
 
-			dir_relpath = str(_relative_to(dir, root))
-			dir_relpath = "" if dir_relpath == "." else dir_relpath # "" works better with os.path.dirname
-			normed_dir_relpath = dir_relpath
-			if convert_sep:
-				normed_dir_relpath = normed_dir_relpath.replace("\\", "/")
-				dir_relpath = dir_relpath.replace("\\", "/")
-			if not self.sftp_compat:
-				normed_dir_relpath = os.path.normcase(normed_dir_relpath)
-
-			if filter(root, dir_relpath + display_sep) or dir_relpath == "":
-				yield _Dir(
-					path         = root / dir_relpath,
-					relpath      = dir_relpath,
-					norm_relpath = normed_dir_relpath,
-					num_files    = len(file_entries),
-					num_dirs     = len(dir_entries),
-				)
-				if not file_entries and not dir_entries:
-					continue
-
-			# prune search tree
+			# prune dirs
+			dirs = []
+			#dir_metadata = {}
 			i = 0
 			while i < len(dir_entries):
-				subdirname = dir_entries[i].name
-				subdir_path = dir / subdirname
-				subdir_relpath = str(_relative_to(subdir_path, root))
-				if not filter(root, subdir_relpath + display_sep):
+				entry = dir_entries[i]
+				dirname = entry.name
+				dir_path = parent / dirname
+				dir_relpath = str(_relative_to(dir_path, root))
+
+				if not filter(root, dir_relpath + self.out_sep):
 					del dir_entries[i]
 					continue
+
+				try:
+					d = _Dir(
+						relpath = dir_relpath,
+						in_sep = self.in_sep,
+						out_sys = self.out_sys,
+					)
+					d._index = i # for ease of removal in later steps
+				except IncompatiblePathError:
+					self.logger.warning(f"Ignoring incompatible parent: {src_root_name}{dir_relpath}{self.in_sep}")
+					continue
+
+				dirs.append(d)
 				i += 1
 
 			# prune files
+			files = []
+			file_metadata = {}
+			i = 0
 			for entry in file_entries:
 				# Ignore non-standard files (e.g., sockets, named pipes, block & character devices), except symlinks.
 				if self.follow_symlinks:
@@ -1039,112 +1127,307 @@ class Sync:
 						continue
 
 				filename = entry.name
-				file_path = dir / filename
+				file_path = parent / filename
 				file_relpath = str(_relative_to(file_path, root))
-
-				normed_file_relpath = file_relpath
-				if convert_sep:
-					normed_file_relpath = normed_file_relpath.replace("\\", "/")
-					file_relpath = file_relpath.replace("\\", "/")
-				if not self.sftp_compat:
-					normed_file_relpath = os.path.normcase(normed_file_relpath)
+				try:
+					f = _File(
+						relpath = file_relpath,
+						in_sep = self.in_sep,
+						out_sys = self.out_sys,
+					)
+				except IncompatiblePathError as e:
+					self.logger.warning(f"Ignoring incompatible file: {src_root_name}{file_relpath}")
+					continue
 
 				if filter(root, file_relpath):
 					stat  = entry.stat(follow_symlinks=self.follow_symlinks)
 					size  = stat.st_size
 					mtime = stat.st_mtime
 					if size is None or mtime is None:
-						# Ignore files with unknown size or mtime.
+						self.logger.warning(f"Ignoring file with unknown metadata: {src_root_name}{file_relpath}")
 						continue
+
 					if self.sftp_compat:
 						mtime = float(int(mtime))
 
-					yield _File(
-						path         = root / file_relpath,
-						relpath      = file_relpath,
-						norm_relpath = normed_file_relpath,
-						meta         = _Metadata(size=size, mtime=mtime),
-					)
+					files.append(f)
+					file_metadata[f] = _Metadata(size=size, mtime=mtime)
+					i += 1
 
-	def _operations(
-			self,
-			*,
-			src_entries : Iterator[_Entry],
-			dst_entries : Iterator[_Entry],
-		) -> Iterator[Operation]:
-		'''Generator of file system operations to perform for this sync.'''
+			parent_relpath = str(_relative_to(parent, root))
+			parent_dir = _Dir(
+				relpath = parent_relpath,
+				in_sep = self.in_sep,
+				out_sys = self.out_sys,
+			)
 
-		display_sep = "/" if self.sftp_compat else os.sep
+			rejected: set[int] = set()
+			yield parent_dir, dirs, files, dir_size, file_metadata, rejected
 
-		dst_root_name = self.dst.name+display_sep if self.trash else ""
-		trash_root_name = self.trash.name+display_sep if self.trash else ""
+			# remove dirs that _operations rejected
+			num_deleted = 0
+			for i in sorted(rejected):
+				del dir_entries[i - num_deleted]
+				num_deleted += 1
 
-		src = set()
-		dst = set()
+	def _dir_diff(self, comp, src_entries, dst_entries) -> tuple[
+		_Dir,
+		dict[_File, _Metadata],
+		dict[_File, _Metadata],
+		set[_Dir],
+		set[_Dir],
+		set[_File],
+		set[_File],
+		dict[_Dir, _Dir],
+		dict[_File, _File],
+		dict[_File, _File],
+		list[list[list[_File]]],
+	]: # TODO return namedtuple
+		'''Returns a tuple of the differences between of two directories.'''
 
-		src_dirs = set()
-		dst_dirs = set()
+		src_file_metadata: dict[_File, _Metadata] = {}
+		dst_file_metadata: dict[_File, _Metadata] = {}
 
-		src_empty_dirs = set()
-		dst_empty_dirs = set()
+		if src_entries:
+			src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, reject_src_dir = src_entries
+			parent_dir = src_parent
+		if dst_entries:
+			dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, reject_dst_dir = dst_entries
+			parent_dir = dst_parent
 
-		dst_dir_size: CounterType[_Entry] = Counter()
-		trash_dirs_created: set[_Entry] = set()
+		src_only_dirs: set[_Dir] = set()
+		dst_only_dirs: set[_Dir] = set()
+		src_only_files: set[_File] = set()
+		dst_only_files: set[_File] = set()
+		file_matches: dict[_File, _File] = {}
+		dir_matches: dict[_Dir, _Dir] = {}
+		rename_map: dict[_File, _File] = {}
+		rename_cycles: list[list[list[_File]]] = []
 
-		for src_entry in src_entries:
-			if isinstance(src_entry, _File):
-				src.add(src_entry)
-			else:
-				src_entry = cast(_Dir, src_entry)
-				dir_size = src_entry.num_files + src_entry.num_dirs
-				if not dir_size:
-					src_empty_dirs.add(src_entry)
-				src_dirs.add(src_entry)
+		src_root_name = self.src.name + self.out_sep if self.trash else ""
+		dst_root_name = self.dst.name + self.out_sep if self.trash else ""
+		trash_root_name = self.trash.name + self.out_sep if self.trash else ""
 
-		for dst_entry in dst_entries:
-			if isinstance(dst_entry, _File):
-				dst.add(dst_entry)
-			else:
-				dst_entry = cast(_Dir, dst_entry)
-				dir_size = dst_entry.num_files + dst_entry.num_dirs
-				if not dir_size:
-					dst_empty_dirs.add(dst_entry)
-				dst_dirs.add(dst_entry)
-				dst_dir_size[dst_entry] = dir_size
+		if comp == -1:
+			for s in src_dirs:
+				src_only_dirs.add(s)
+			for f in src_files:
+				src_only_files.add(f)
 
-		self.logger.debug(f"{len(src)=}")
-		self.logger.debug(f"{len(dst)=}")
+		elif comp == 0:
 
-		src_only = sorted(src.difference(dst))
-		dst_only = sorted(dst.difference(src))
+			existing_dst: dict[_Relpath, list[_Relpath]] = {}
+			new_dst: dict[_Relpath, list[_Relpath]] = {}
 
-		src = sorted(src)
-		dst = sorted(dst)
+			for d in dst_dirs:
+				existing_dst[d] = []
+			for f in dst_files:
+				existing_dst[f] = []
 
-		def both():
-			try:
-				src_iter = iter(src)
-				dst_iter = iter(dst)
-				s = next(src_iter)
-				d = next(dst_iter)
-				while s == d:
-					yield s, d
-					s = next(src_iter)
-					d = next(dst_iter)
-				while s < d:
-					s = next(src_iter)
-				while s > d:
-					d = next(dst_iter)
-			except StopIteration:
-				return
+			for d in src_dirs:
+				try:
+					existing_dst[d].append(d)
+				except KeyError:
+					try:
+						new_dst[d].append(d)
+					except KeyError:
+						new_dst[d] = [d]
+			for f in src_files:
+				try:
+					existing_dst[f].append(f)
+				except KeyError:
+					try:
+						new_dst[f].append(f)
+					except KeyError:
+						new_dst[f] = [f]
 
-		# Ignore remote files with invalid characters when copying to Windows
-		if os.sep == "nt" and isinstance(self.src, RemotePath):
-			for src_entry in src_only.copy():
-				if os.path.isreserved(str(src_entry)) or "\\" in src_entry:
-					self.logger.warning(f"Ignoring incompatible remote file: {src_entry}")
-					src_only.remove(src_entry)
+			ignored_src_entries = set()
+			ignored_dst_entries = set()
 
+			for dst_entry, matches in existing_dst.items():
+				type_entry = type(dst_entry)
+				strong_match = None
+				weak_match = None
+				reject_dst = False
+				reject_src = set()
+				for match in matches:
+					if type_entry != type(match) and not self.force_update:
+						reject_dst = True
+						break
+					elif dst_entry.name == match.name:
+						strong_match = match
+						if weak_match:
+							reject_src.add(weak_match)
+					elif dst_entry.norm[-1] == match.norm[-1]:
+						if strong_match:
+							reject_src.add(match)
+						if weak_match is None:
+							weak_match = match
+						elif weak_match:
+							reject_src.add(match)
+							reject_src.add(weak_match)
+							weak_match = False
+						else:
+							reject_src.add(match)
+
+				if weak_match is False and strong_match is None:
+					reject_dst = True
+				if reject_dst:
+					reject_src = matches
+				for s in reject_src:
+					if type(s) == _Dir:
+						reject_src_dir.add(s._index) # stops recursion into this dir
+						self.logger.warning(f"Match conflict: {src_root_name}{s}{self.out_sep}")
+					else:
+						self.logger.warning(f"Match conflict: {src_root_name}{s}")
+					ignored_src_entries.add(id(s)) # stops this from being a rename candidate
+				if reject_dst:
+					if type(dst_entry) == _Dir:
+						reject_dst_dir.add(dst_entry._index)
+						self.logger.warning(f"Match conflict: {dst_root_name}{dst_entry}{self.out_sep}")
+					else:
+						self.logger.warning(f"Match conflict: {dst_root_name}{dst_entry}")
+					ignored_dst_entries.add(id(dst_entry))
+
+				final_match = strong_match or weak_match
+				if final_match:
+					if type(final_match) == _Dir and type(dst_entry) == _Dir:
+						dir_matches[final_match] = dst_entry
+					elif type(final_match) == _File and type(dst_entry) == _File:
+						file_matches[final_match] = dst_entry
+					elif type(final_match) == _File and type(dst_entry) == _Dir:
+						src_only_files.add(final_match)
+						dst_only_dirs.add(dst_entry)
+					else:
+						src_only_dirs.add(final_match)
+						dst_only_files.add(dst_entry)
+
+				elif not reject_dst:
+					if type_entry == _Dir:
+						dst_only_dirs.add(dst_entry)
+					else:
+						dst_only_files.add(dst_entry)
+
+			for dst_entry, matches in new_dst.items():
+				if len(matches) > 1:
+					for match in matches:
+						if type(match) == _Dir:
+							reject_src_dir.add(match._index)
+							self.logger.warning(f"Match conflict: {src_root_name}{match}{self.out_sep}")
+						else:
+							self.logger.warning(f"Match conflict: {src_root_name}{match}")
+						ignored_src_entries.add(id(match))
+				else:
+					match = matches[0]
+					if type(dst_entry) == _Dir:
+						src_only_dirs.add(dst_entry)
+					else:
+						src_only_files.add(dst_entry)
+
+			# Determine file renames
+			if self.rename_threshold is not None:
+				'''
+				src_meta_to_relpath: dict[_Metadata, _File|None] = {}
+				dst_meta_to_relpath: dict[_Metadata, _File|None] = {}
+
+				for comp, s, d in _merge_iters(set_src_files, set_dst_files):
+					if comp == -1:
+						if s.meta in src_meta_to_relpath:
+							src_meta_to_relpath[s.meta] = None
+						else:
+							src_meta_to_relpath[s.meta] = s
+					if comp == 1:
+						if d.meta in dst_meta_to_relpath:
+							dst_meta_to_relpath[d.meta] = None
+						else:
+							dst_meta_to_relpath[d.meta] = d
+				'''
+				src_meta_to_relpath = _reverse_dict({k:v for k,v in src_file_metadata.items() if id(k) not in ignored_src_entries})
+				dst_meta_to_relpath = _reverse_dict({k:v for k,v in dst_file_metadata.items() if id(k) not in ignored_dst_entries})
+
+				unique_src = set(k for k,v in src_meta_to_relpath.items() if v is not None and k.size >= self.rename_threshold)
+				unique_dst = set(k for k,v in dst_meta_to_relpath.items() if v is not None and k.size >= self.rename_threshold)
+				matched_meta = unique_src.intersection(unique_dst)
+
+				for meta in matched_meta:
+					src_file = src_meta_to_relpath[meta]
+					dst_file = dst_meta_to_relpath[meta]
+
+					if src_file == dst_file:
+						continue
+
+					assert src_file is not None
+					assert dst_file is not None
+
+					# Ignore if last 1kb do not match
+					if not self.metadata_only:
+						try:
+							if not _last_bytes(self.src / src_file) == _last_bytes(self.dst / dst_file):
+								continue
+						except OSError as e:
+							self.logger.warning(_exc_summary(e))
+							continue
+
+					rename_map[dst_file] = src_file
+
+				# find rename chains/cycles from map
+				handled_renames = set()
+				for rename_from in rename_map:
+					if rename_from in handled_renames:
+						continue
+					rename_cycle: list[list[_File]] = []
+					first = rename_from
+
+					# get chain/cycle if it exists
+					while True:
+						handled_renames.add(rename_from)
+						if rename_from not in rename_map:
+							rename_cycle = []
+							break
+
+						rename_to = rename_map[rename_from]
+						rename_cycle.append([rename_from, rename_to])
+
+						if rename_to in src_only_files:
+							rename_cycle = list(reversed(rename_cycle))
+							break
+						elif rename_to == first:
+							rename_cycle[-1][1] = rename_to + ".tempcopy"
+							rename_cycle = list(reversed(rename_cycle))
+							rename_cycle.append([rename_to + ".tempcopy", rename_to])
+							break
+
+						rename_from = rename_to
+
+					# remove renamed files from other collections
+					if rename_cycle:
+						rename_cycles.append(rename_cycle)
+						for cycle in rename_cycles:
+							for step in cycle:
+								rename_from, rename_to = step[0], step[1]
+								try:
+									dst_only_files.remove(rename_from)
+								except KeyError:
+									pass
+								try:
+									del file_matches[rename_from]
+								except KeyError:
+									pass
+								try:
+									src_only_files.remove(rename_to)
+								except KeyError:
+									pass
+
+		else:
+			# dst dir needs to be deleted
+			for d in dst_dirs:
+				assert d is not None
+				dst_only_dirs.add(d)
+			for f in dst_files:
+				dst_only_files.add(f)
+
+		# TODO
+		'''
 		self.logger.debug(f"{len(src_only)=}")
 		self.logger.debug(f"{len(dst_only)=}")
 		#self.logger.debug(f"{len(both)=}")
@@ -1160,171 +1443,211 @@ class Sync:
 		self.logger.debug(f"{list(islice(dst_dirs, 10))=}")
 		self.logger.debug(f"{list(islice(src_empty_dirs, 10))=}")
 		self.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
+		'''
 
-		def _automatic_dir_create_ops(dir:_Entry, *, root_name:str = ""):
-			if dir and not dst_dir_size[dir]:
-				yield CreateDirOperation(
-					dst     = self.dst / dir,
-					summary = f"+ {root_name}{dir}{display_sep}",
-				)
-				dir = dir.parent
-				dst_dir_size[dir] += 1
+		return (
+			parent_dir,
+			src_file_metadata,
+			dst_file_metadata,
+			src_only_dirs,
+			dst_only_dirs,
+			src_only_files,
+			dst_only_files,
+			dir_matches,
+			file_matches,
+			rename_map,
+			rename_cycles,
+		)
 
-		def _automatic_dir_delete_ops(dir:_Entry, *, root_name:str = ""):
-			while dir and dir not in src_dirs and not dst_dir_size[dir]:
-				yield DeleteDirOperation(
-					dst     = self.dst / dir,
-					summary = f"- {root_name}{dir}{display_sep}",
-				)
-				dir = dir.parent
-				dst_dir_size[dir] -= 1
-				assert dst_dir_size[dir] >= 0
+	def _operations(self) -> Iterator[Operation]:
+		src_root_name = self.src.name + self.out_sep if self.trash else ""
+		dst_root_name = self.dst.name + self.out_sep if self.trash else ""
+		trash_root_name = self.trash.name + self.out_sep if self.trash else ""
 
-		# Delete empty directories now in case any new files needs to take their places
-		dst_only_empty_dirs = dst_empty_dirs.difference(src_dirs)
-		for entry in dst_only_empty_dirs:
-			yield from _automatic_dir_delete_ops(entry, root_name=dst_root_name)
+		src_iter = self._scandir(self.src)
+		if self.dst.exists():
+			dst_iter = self._scandir(self.dst)
+		else:
+			dst_iter = iter([])
+			dst_file_metadata: dict[_File, _Metadata] = {}
 
-		# Determine file renames
-		renames = {}
-		if self.rename_threshold is not None:
-			src_only_meta_to_entry = _reverse_dict({entry:entry.meta for entry in src_only})
-			dst_only_meta_to_entry = _reverse_dict({entry:entry.meta for entry in dst_only})
-
-			for dst_entry in dst_only.copy(): # dst_only is changed inside the loop
-				# Ignore small files
-				if dst_entry.meta.size < self.rename_threshold:
-					continue
-				try:
-					src_entry = src_only_meta_to_entry[dst_entry.meta]
-					# Ignore if there are multiple candidates
-					if src_entry is None:
-						continue
-
-					dst_entry = dst_only_meta_to_entry[dst_entry.meta]
-					# Ignore if there are multiple candidates
-					if dst_entry is None:
-						continue
-
-					# Ignore if last 1kb do not match
-					if not self.metadata_only:
-						on_dst = self.dst / dst_entry
-						on_src = self.src / src_entry
-						try:
-							if not _last_bytes(on_src) == _last_bytes(on_dst):
-								continue
-						except OSError as e:
-							self.logger.warning(_exc_summary(e))
-							continue
-
-					src_only.remove(src_entry)
-					dst_only.remove(dst_entry)
-
-					renames[dst_entry] = src_entry
-
-				except KeyError:
-					# dst file not a result of a rename
-					continue
-
-		# Delete files
-		if self.delete_files:
-			for dst_entry in dst_only:
-				yield DeleteFileOperation(
-					dst       = self.dst / dst_entry,
-					byte_diff = -dst_entry.meta.size,
-					summary   = f"- {dst_root_name}{dst_entry}",
-				)
-				parent = dst_entry.parent
-				dst_dir_size[parent] -= 1
-				assert dst_dir_size[parent] >= 0
-				yield from _automatic_dir_delete_ops(parent, root_name=dst_root_name)
-
-		# Send files to trash
-		elif self.trash is not None:
-			for dst_entry in dst_only:
-				parent = dst_entry.parent
-				if parent and parent not in trash_dirs_created:
-					yield CreateDirOperation(
-						dst       = self.trash / parent,
-						summary   = f"+ {trash_root_name}{parent}{display_sep}",
+		def _delete_ops(dst_relpath:_Relpath, dst_file_metadata) -> Iterator[Operation]:
+			if isinstance(dst_relpath, _File):
+				if self.trash:
+					yield TrashFileOperation(
+						dst       = dst_relpath,
+						summary   = f"T {dst_root_name}{dst_relpath}",
 					)
-					trash_dirs_created.add(parent)
-				yield TrashFileOperation(
-					dst       = self.dst / dst_entry,
-					target    = self.trash / dst_entry,
-					summary   = f"T {dst_root_name}{dst_entry}",
-				)
-				dst_dir_size[parent] -= 1
-				assert dst_dir_size[parent] >= 0
-				yield from _automatic_dir_delete_ops(parent, root_name=dst_root_name)
+				else:
+					yield DeleteFileOperation(
+						dst       = dst_relpath,
+						byte_diff = -dst_file_metadata[dst_relpath].size,
+						summary   = f"- {dst_root_name}{dst_relpath}",
+					)
+			else:
+				assert isinstance(dst_relpath, _Dir)
+				if self.trash:
+					yield TrashDirOperation(
+						dst     = dst_relpath,
+						summary = f"T {dst_root_name}{dst_relpath}{self.out_sep}",
+					)
+				else:
+					yield DeleteDirOperation(
+						dst     = dst_relpath,
+						summary = f"- {dst_root_name}{dst_relpath}{self.out_sep}",
+					)
 
-		# Rename files
-		for dst_entry in renames:
-			src_entry = renames[dst_entry]
-			yield from _automatic_dir_create_ops(src_entry.parent, root_name=dst_root_name)
-			yield RenameFileOperation(
-				dst       = self.dst / dst_entry,
-				target    = self.dst / src_entry,
-				summary   = f"R {dst_root_name}{dst_entry} -> {dst_root_name}{src_entry}",
-			)
-			parent = dst_entry.parent
-			dst_dir_size[parent] -= 1
-			assert dst_dir_size[parent] >= 0
-			parent = src_entry.parent
-			dst_dir_size[parent] += 1
-			yield from _automatic_dir_delete_ops(parent, root_name=dst_root_name)
-
-		# Create files
-		if not self.no_create:
-			for src_entry in src_only:
-				parent = src_entry.parent
-				yield from _automatic_dir_create_ops(parent, root_name=dst_root_name)
-				src_path = self.src / src_entry
-				dst_path = self.dst / src_entry
-				if not self.follow_symlinks and src_path.is_symlink():
+		def _create_ops(dst_relpath:_Relpath, src_file_metadata) -> Iterator[Operation]:
+			if isinstance(dst_relpath, _File):
+				if not self.follow_symlinks and (self.src / dst_relpath).is_symlink():
 					yield CreateSymlinkOperation(
-						src       = src_path,
-						dst       = dst_path,
+						src       = dst_relpath,
+						dst       = dst_relpath,
 						byte_diff = 0,
-						summary   = f"+ {dst_root_name}{src_entry}",
+						summary   = f"+ {dst_root_name}{dst_relpath}",
 					)
 				else:
 					yield CreateFileOperation(
-						src       = src_path,
-						dst       = dst_path,
-						byte_diff = src_entry.meta.size,
-						summary   = f"+ {dst_root_name}{src_entry}",
+						src       = dst_relpath,
+						dst       = dst_relpath,
+						byte_diff = src_file_metadata[dst_relpath].size,
+						summary   = f"+ {dst_root_name}{dst_relpath}",
 					)
-				dst_dir_size[parent] += 1
-
-		# Update files that have newer mtimes
-		for src_entry, dst_entry in both():
-			src_time = src_entry.meta.mtime
-			dst_time = dst_entry.meta.mtime
-			byte_diff = src_entry.meta.size - dst_entry.meta.size
-			if src_time > dst_time:
-				yield UpdateFileOperation(
-					src       = self.src / src_entry,
-					dst       = self.dst / dst_entry,
-					byte_diff = byte_diff,
-					summary   = f"U {dst_root_name}{dst_entry}",
+			else:
+				assert isinstance(dst_relpath, _Dir)
+				yield CreateDirOperation(
+					dst     = dst_relpath,
+					summary = f"+ {dst_root_name}{dst_relpath}{self.out_sep}",
 				)
+
+		def _update_ops(src_relpath:_Relpath, dst_relpath:_Relpath, src_file_metadata, dst_file_metadata) -> Iterator[Operation]:
+			src_time = src_file_metadata[src_relpath].mtime
+			dst_time = dst_file_metadata[dst_relpath].mtime
+			byte_diff = src_file_metadata[src_relpath].size - dst_file_metadata[dst_relpath].size
+
+			do_update = False
+
+			if src_time > dst_time:
+				do_update = True
 			elif src_time < dst_time:
 				if self.force_update:
-					yield UpdateFileOperation(
-						src       = self.src / src_entry,
-						dst       = self.dst / dst_entry,
-						byte_diff = byte_diff,
-						summary   = f"U {dst_root_name}{dst_entry}",
-					)
+					do_update = True
 				else:
-					self.logger.warning(f"'src' file is older than 'dst' file, skipping update: {entry}")
+					self.logger.warning(f"'dst' file is newer than 'src' file: {dst_root_name}{dst_relpath}")
 
-		# Create empty directories
-		if not self.no_create:
-			src_only_empty_dirs = src_empty_dirs.difference(dst_dirs)
-			for entry in src_only_empty_dirs:
-				yield from _automatic_dir_create_ops(entry, root_name=dst_root_name)
+			if do_update:
+				yield UpdateFileOperation(
+					src       = src_relpath,
+					dst       = dst_relpath,
+					byte_diff = byte_diff,
+					summary   = f"U {dst_root_name}{dst_relpath}",
+				)
+				if src_relpath != dst_relpath:
+					yield RenameFileOperation(
+						src       = src_relpath,
+						dst       = dst_relpath,
+						summary   = f"R {src_root_name}{src_relpath} -> {dst_root_name}{dst_relpath}",
+					)
+
+		def _rename_ops(rename_cycles: list[list[list[_File]]]) -> Iterator[Operation]:
+			for cycle in rename_cycles:
+				for step in cycle:
+					rename_from, rename_to = step[0], step[1]
+					yield RenameFileOperation(
+						dst       = rename_from,
+						target    = rename_to,
+						summary   = f"R {dst_root_name}{rename_from} -> {dst_root_name}{rename_to}",
+					)
+
+		deleting_dirs_under = None
+
+		# yield after exiting this directory
+		# delete ops always need to be yielded after this dir
+		# other ops only need to be yielded after this dir if there are delete ops
+		delete_after: list[Operation] = []
+		create_after: list[Operation] = []
+		update_after: list[Operation] = []
+		rename_after: list[Operation] = []
+
+		for comp, src_entries, dst_entries in _merge_iters(src_iter, dst_iter, key=lambda x: x[0]):
+			(
+				parent_dir,
+				src_file_metadata,
+				dst_file_metadata,
+				src_only_dirs,
+				dst_only_dirs,
+				src_only_files,
+				dst_only_files,
+				dir_matches,
+				file_matches,
+				rename_map,
+				rename_cycles,
+			) = self._dir_diff(comp, src_entries, dst_entries)
+
+			delete_now: list[Operation] = []
+			create_now: list[Operation] = []
+			update_now: list[Operation] = []
+			rename_now: list[Operation] = []
+
+			if deleting_dirs_under and not parent_dir.is_relative_to(deleting_dirs_under):
+				yield from sorted(delete_after) # reversed(delete_after) should also work
+				yield from sorted(create_after)
+				yield from sorted(update_after)
+				yield from rename_after
+				delete_after = []
+				create_after = []
+				update_after = []
+				rename_after = []
+				deleting_dirs_under = None
+
+			if dst_only_dirs and deleting_dirs_under is None:
+			#if deleting_dirs_under is None and (any(f in dst_only_dirs for f in src_only_files) or any(d in dst_only_dirs for d in src_only_dirs)):
+				deleting_dirs_under = parent_dir
+
+			if deleting_dirs_under:
+				deletes = delete_after
+				creates = create_after
+				updates = update_after
+				renames = rename_after
+			else:
+				deletes = delete_now
+				creates = create_now
+				updates = update_now
+				renames = rename_now
+
+			# renames
+			renames.extend(_rename_ops(rename_cycles))
+
+			# deletes
+			for d in dst_only_dirs:
+				deletes.extend(_delete_ops(d, None))
+			for f in dst_only_files:
+				deletes.extend(_delete_ops(f, dst_file_metadata))
+
+			# creates
+			if not self.no_create:
+				for s in src_only_dirs:
+					creates.extend(_create_ops(s, None))
+				for s in src_only_files:
+					creates.extend(_create_ops(s, src_file_metadata))
+
+			# updates
+			for s, d in file_matches.items():
+				updates.extend(_update_ops(s, d, src_file_metadata, dst_file_metadata))
+
+			# TODO combine delete/trash ops into trash/delete dir ops
+			# dir_size would be needed for this
+
+			yield from sorted(delete_now)
+			yield from sorted(create_now)
+			yield from sorted(update_now)
+			yield from rename_now
+
+
+		yield from sorted(delete_after) # reversed(delete_after) should also work
+		yield from sorted(create_after)
+		yield from sorted(update_after)
+		yield from rename_after
 
 	def run(self) -> Results:
 		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''
@@ -1345,16 +1668,7 @@ class Sync:
 			self.logger.info("-> " + str(self.dst), extra=HEADER)
 			self.logger.info("-" * width, extra=HEADER)
 
-			src_entries = self._scandir(self.src)
-			if self.dst.exists():
-				dst_entries = self._scandir(self.dst)
-			else:
-				dst_entries = iter([])
-
-			for op in self._operations(
-				src_entries = src_entries,
-				dst_entries = dst_entries,
-			):
+			for op in self._operations():
 				if any(op.depends_on(failed_op) for failed_op, _ in self.results.sync_errors):
 					self.logger.debug(f"Dependent failure: {op.summary}")
 					continue
@@ -1366,7 +1680,7 @@ class Sync:
 						op.perform(self)
 						self.results.tally_success(op)
 					except OSError as e:
-						self.logger.error(_exc_summary(e))
+						self.logger.error(_exc_summary(e)) # TODO include_root = bool(self.trash)
 						self.results.tally_failure(op, e)
 
 			self.results.status = Results.Status.COMPLETED
@@ -1452,7 +1766,7 @@ def _create_symlink(dst:PathType, *, target:str, st, exist_ok:bool = True) -> No
 			os.symlink(target, dst_tmp, target_is_directory=stat.S_ISDIR(st.st_mode))
 		else:
 			RemotePath.symlink(target, dst_tmp)
-		# repalce the temp file
+		# replace the temp file
 		_replace(dst_tmp, dst)
 	finally:
 		dst_tmp.unlink(missing_ok=True)
@@ -1520,10 +1834,10 @@ def _replace(src:PathType, dst:PathType) -> None:
 
 # this is just needed to stop mypy from complaining
 def _relative_to(path:PathType, root:PathType) -> PathType:
-	if isinstance(path, Path):
-		return path.relative_to(cast(Path, root))
-	else:
+	if isinstance(path, RemotePath):
 		return path.relative_to(cast(RemotePath, root))
+	else:
+		return path.relative_to(cast(Path, root))
 
 def _last_bytes(file:PathType, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''
@@ -1536,21 +1850,21 @@ def _last_bytes(file:PathType, n:int = 1024) -> bytes:
 		f.seek(-bytes_to_read, os.SEEK_END)
 		return f.read()
 
-def _convert_pathsep(path:str, in_sep:str, out_sep:str):
+def _convert_sep(path:str, in_sep:str, out_sep:str):
 	r'''
 	Translates `in_sep` (path separators) in  `path` to `out_sep`.
 
-	>>> _convert_pathsep("\\a/b", "/", "\\")
+	>>> _convert_sep("\\a/b", "/", "\\")
 	Traceback (most recent call last):
 	...
 	psync.errors.IncompatiblePathError: [Errno 1] Incompatible path for this system: '\\a/b'
-	>>> _convert_pathsep("a/b", "/", "\\")
+	>>> _convert_sep("a/b", "/", "\\")
 	'a\\b'
-	>>> _convert_pathsep("\\a/b", "\\", "/")
+	>>> _convert_sep("\\a/b", "\\", "/")
 	'/a/b'
-	>>> _convert_pathsep("\\a/b", "/", "/")
+	>>> _convert_sep("\\a/b", "/", "/")
 	'\\a/b'
-	>>> _convert_pathsep("\\a/b", "\\", "\\")
+	>>> _convert_sep("\\a/b", "\\", "\\")
 	'\\a\\b'
 	'''
 
@@ -1563,6 +1877,6 @@ def _convert_pathsep(path:str, in_sep:str, out_sep:str):
 		return path.replace("\\", "/")
 	else:
 		if "\\" in path:
-			raise IncompatiblePathError(1, "Incompatible path for this system", str(path))
+			raise IncompatiblePathError("Incompatible path for this system", str(path))
 		else:
 			return path.replace("/", "\\")

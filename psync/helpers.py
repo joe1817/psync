@@ -44,3 +44,77 @@ def _human_readable_size(n:int) -> str:
 		n //= 1024
 		i += 1
 	return f"{sign}{round(n)} {units[i]}"
+
+def _merge_iters(src, dst, *, key=lambda x: x):
+	'''
+	Repeatedly yields the lowest element from each iterable, similar to how merge sort works.
+
+	>>> list(_merge_iters([1,3,5], [2,4,6]))
+	[(-1, 1, 2), (1, 3, 2), (-1, 3, 4), (1, 5, 4), (-1, 5, 6), (1, None, 6)]
+	>>> list(_merge_iters([1,2], [2,2,3]))
+	[(-1, 1, 2), (0, 2, 2), (1, None, 2), (1, None, 3)]
+	>>> list(_merge_iters([(1,1)], [(1,1)]))
+	[(0, (1, 1), (1, 1))]
+	'''
+
+	src_iter = iter(src)
+	dst_iter = iter(dst)
+	stopped  = object()
+
+	try:
+		try:
+			s = next(src_iter)
+			s_comp = key(s)
+		except StopIteration:
+			s = stopped
+		try:
+			d = next(dst_iter)
+			d_comp = key(d)
+		except StopIteration:
+			d = stopped
+		if s is stopped or d is stopped:
+			raise StopIteration
+
+		while True:
+			while s_comp == d_comp:
+				yield 0, s, d
+				try:
+					s = next(src_iter)
+					s_comp = key(s)
+				except StopIteration:
+					s = stopped
+				try:
+					d = next(dst_iter)
+					d_comp = key(d)
+				except StopIteration:
+					d = stopped
+				if s is stopped or d is stopped:
+					raise StopIteration
+
+			while s_comp < d_comp:
+				yield -1, s, d
+				try:
+					s = next(src_iter)
+					s_comp = key(s)
+				except StopIteration:
+					s = stopped
+					raise StopIteration
+
+			while s_comp > d_comp:
+				yield 1, s, d
+				try:
+					d = next(dst_iter)
+					d_comp = key(d)
+				except StopIteration:
+					d = stopped
+					raise StopIteration
+
+	except StopIteration:
+		if s is stopped and d is stopped:
+			return
+		if s is stopped:
+			yield 1, None, d
+			yield from ((1,None,d) for d in dst_iter)
+		else:
+			yield -1, s, None
+			yield from ((-1,s,None) for s in src_iter)

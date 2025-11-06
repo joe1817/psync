@@ -86,13 +86,18 @@ class _LogFileFormatter(logging.Formatter):
 		return msg
 
 logger = logging.getLogger("psync")
-logger.setLevel(logging.INFO)
-handler_stdout = logging.StreamHandler(sys.stdout)
-handler_stderr = logging.StreamHandler(sys.stderr)
-handler_stdout.addFilter(_DebugInfoFilter())
-handler_stdout.setLevel(logging.DEBUG)
-handler_stderr.setLevel(logging.WARNING)
-handler_stdout.setFormatter(_ConsoleFormatter())
-handler_stderr.setFormatter(_ConsoleFormatter())
-logger.addHandler(handler_stdout)
-logger.addHandler(handler_stderr)
+
+def setup_logger():
+	if not logger.handlers:
+		logger.setLevel(logging.INFO)
+		handler_stdout = logging.StreamHandler(sys.stdout)
+		handler_stderr = logging.StreamHandler(sys.stderr)
+		handler_stdout.addFilter(_DebugInfoFilter())
+		handler_stdout.setLevel(logging.DEBUG)
+		handler_stderr.setLevel(logging.WARNING)
+		handler_stdout.setFormatter(_ConsoleFormatter())
+		handler_stderr.setFormatter(_ConsoleFormatter())
+		logger.addHandler(handler_stdout)
+		logger.addHandler(handler_stderr)
+
+setup_logger()

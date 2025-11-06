@@ -7,7 +7,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-from psync import core, filter
+from psync import core, filter, log
 from .utils import *
 
 logger = logging.getLogger("psync.tests")
@@ -64,6 +64,11 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(sync.rename_threshold, 0)
 			sync.rename_threshold = None
 			self.assertEqual(sync.rename_threshold, None)
+
+			sync.symlink_translation = True
+			self.assertEqual(sync.symlink_translation, True)
+			sync.symlink_translation = False
+			self.assertEqual(sync.symlink_translation, False)
 
 			sync.ignore_symlinks = True
 			sync.follow_symlinks = False
@@ -185,6 +190,7 @@ class TestSync(unittest.TestCase):
 
 			sync.filter = "- b/ c/ + **/*/ **/1.???"
 			files = sync._scandir(root = root)
+			files = sum((x[2] for x in files), start=[])
 			files_expected = [
 				"a/aa/1.txt",
 				"a/aa/aaa/1.txt",
@@ -194,7 +200,7 @@ class TestSync(unittest.TestCase):
 				"a/1.jpg",
 			]
 			self.assertEqual(
-				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
+				sorted(f.relpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -202,13 +208,14 @@ class TestSync(unittest.TestCase):
 
 			sync.filter = "+ a/a?/a?b/*"
 			files = sync._scandir(root = root)
+			files = sum((x[2] for x in files), start=[])
 			files_expected = [
 				"a/aa/aab/12.txt",
 				"a/ab/abb/12.jpg",
 				"a/ac/acb/12.html",
 			]
 			self.assertEqual(
-				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
+				sorted(f.relpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -238,6 +245,7 @@ class TestSync(unittest.TestCase):
 			sync.ignore_symlinks = False
 			sync.follow_symlinks = False
 			files = sync._scandir(root = root / "d")
+			files = sum((x[2] for x in files), start=[])
 			files_expected = [
 				"1.txt",
 				"2.txt",
@@ -246,7 +254,7 @@ class TestSync(unittest.TestCase):
 				"eb",
 			]
 			self.assertEqual(
-				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
+				sorted(f.relpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
@@ -256,6 +264,7 @@ class TestSync(unittest.TestCase):
 			sync.ignore_symlinks = False
 			sync.follow_symlinks = True
 			files = sync._scandir(root = root / "d")
+			files = sum((x[2] for x in files), start=[])
 			files_expected = [
 				"1.txt",
 				"2.txt",
@@ -266,22 +275,24 @@ class TestSync(unittest.TestCase):
 				"eb/2.txt",
 			]
 			self.assertEqual(
-				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
+				sorted(f.relpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
 
 			################################################################################
 
-			sync.filter = "+ **"
-			sync.ignore_symlinks = False
-			sync.follow_symlinks = True
-			files = sync._scandir(root = root / "g")
-			files_expected = [
-				"1.txt",
-			]
 			with TempLoggingLevel(sync.logger, logging.ERROR):
+				sync.filter = "+ **"
+				sync.ignore_symlinks = False
+				sync.follow_symlinks = True
+				files = sync._scandir(root = root / "g")
+				sync.logger.level = logging.ERROR
+				files = sum((x[2] for x in files), start=[])
+				files_expected = [
+					"1.txt",
+				]
 				self.assertEqual(
-					sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
+					sorted(f.relpath for f in files),
 					sorted(f.replace("/", os.sep) for f in files_expected)
 				)
 
@@ -291,95 +302,14 @@ class TestSync(unittest.TestCase):
 			sync.follow_symlinks = False
 			sync.ignore_symlinks = True
 			files = sync._scandir(root = root / "d")
+			files = sum((x[2] for x in files), start=[])
 			files_expected = [
 				"1.txt",
 			]
 			self.assertEqual(
-				sorted(f.norm_relpath for f in files if not isinstance(f, core._Dir)),
+				sorted(f.relpath for f in files),
 				sorted(f.replace("/", os.sep) for f in files_expected)
 			)
-
-	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-	def test_operations(self):
-		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
-			root = Path(temp_root)
-			file_structure = {
-				"a": {
-					"a": {
-						"1.txt": None
-					},
-				},
-				"b": {
-					"A": {
-						"1.txt": (None, 0)
-					},
-					"empty": {
-						"empty2": {
-						},
-					},
-				},
-				"c": {
-					"aa": {
-						"1.txt": None
-					},
-				},
-			}
-			create_file_structure(root, file_structure)
-
-			a_root = root / "a"
-			b_root = root / "b"
-
-			sync = core.Sync(a_root, b_root)
-			sync.trash            = root / "trash"
-			sync.delete_files     = False
-			sync.force_update     = False
-			sync.metadata_only    = True
-			sync.rename_threshold = 0
-
-			actual = list(op.summary for op in sync._operations(
-				src_entries = sync._scandir(root = a_root),
-				dst_entries = sync._scandir(root = b_root),
-			))
-
-			if os.name == "nt":
-				expected = [
-					f"- {os.path.join('b', 'empty', 'empty2') + os.sep}",
-					f"- {os.path.join('b', 'empty') + os.sep}",
-					f"U {os.path.join('b', 'A', '1.txt')}",
-				]
-			else:
-				expected = [
-					f"R {os.path.join('b', 'a', '1.txt')} -> {os.path.join('A', '1.txt')}",
-					f"- {os.path.join('b', 'empty', 'empty2') + os.sep}"
-					f"- {os.path.join('b', 'empty') + os.sep}",
-				]
-			self.assertEqual(actual, expected)
-
-			################################################################################
-
-			a_root = root / "a"
-			c_root = root / "c"
-
-			sync = core.Sync(a_root, c_root)
-			sync.trash            = root / "trash"
-			sync.delete_files     = False
-			sync.force_update     = False
-			sync.metadata_only    = True
-			sync.rename_threshold = 1000
-
-			actual = list(op.summary for op in sync._operations(
-				src_entries = sync._scandir(root = a_root),
-				dst_entries = sync._scandir(root = c_root),
-			))
-			expected = [
-				f"+ {os.path.join('trash', 'aa') + os.sep}",
-				f"T {os.path.join('c', 'aa', '1.txt')}",
-				f"- {os.path.join('c', 'aa') + os.sep}",
-				f"+ {os.path.join('c', 'a') + os.sep}",
-				f"+ {os.path.join('c', 'a', '1.txt')}",
-			]
-			self.assertEqual(actual, expected)
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -519,11 +449,23 @@ class TestSync(unittest.TestCase):
 					"A": {
 						"A3.txt": None,
 					},
+					"empty3": {
+						"empty3-empty": {
+						},
+					},
 				},
 				"linux_expected_trash": {
 					"A": {
 						"A1.txt": ("old info", 1),
 						"A3.txt": None,
+					},
+					"Empty": {
+						"Empty-empty": {
+						},
+					},
+					"empty3": {
+						"empty3-empty": {
+						},
 					},
 				},
 			}
@@ -547,7 +489,86 @@ class TestSync(unittest.TestCase):
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-	def test_run__basic2(self):
+	def test_run__no_force_update(self):
+		# test backup involving many overlapping file names
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a1": {
+						"a": (None, 2)
+					},
+					"b1": {},
+					"c1": (None, 2),
+
+					"a2": {
+						"a": (None, 2)
+					},
+					"b2": {},
+					"c2": (None, 2),
+
+					"a3": {
+						"a": (None, 2)
+					},
+					"b3": {},
+					"c3": (None, 2),
+				},
+				"dst": {
+					"a1": {
+						"a": (None, 1)
+					},
+					"b1": {},
+					"c1": (None, 1),
+
+					"b2": {
+						"a": (None, 1)
+					},
+					"c2": {},
+					"a2": (None, 1),
+
+					"c3": {
+						"a": (None, 1)
+					},
+					"a3": {},
+					"b3": (None, 1),
+				},
+				"expected": {
+					"a1": {
+						"a": (None, 2)
+					},
+					"b1": {},
+					"c1": (None, 2),
+
+					"b2": {},
+					"c2": {},
+					"a2": (None, 1),
+
+					"c3": {
+						"a": (None, 1)
+					},
+					"a3": {
+						"a": (None, 2)
+					},
+					"b3": (None, 1),
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+			expected = root / "expected"
+
+			results = core.Sync(
+				src,
+				dst,
+				trash = "auto",
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(dst), hash_directory(expected))
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__force_update(self):
 		# test backup involving many overlapping file names
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
@@ -590,6 +611,25 @@ class TestSync(unittest.TestCase):
 					"a3": {},
 					"b3": ("", 1),
 				},
+				"dst": {
+					"a1": {
+						"a": (None, 1)
+					},
+					"b1": {},
+					"c1": (None, 1),
+
+					"b2": {
+						"a": (None, 1)
+					},
+					"c2": {},
+					"a2": (None, 1),
+
+					"c3": {
+						"a": (None, 1)
+					},
+					"a3": {},
+					"b3": (None, 1),
+				},
 			}
 			create_file_structure(root, file_structure)
 			src = root / "src"
@@ -599,11 +639,12 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				trash = "auto",
-				print_level = 10,
+				force_update = True,
+				print_level = 100,
 			).run()
 
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
-			self.assertEqual(hash_directory(src, hash_mtime=True, verbose=True), hash_directory(dst, hash_mtime=True, verbose=True))
+			self.assertEqual(hash_directory(src), hash_directory(dst))
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -707,6 +748,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
+				metadata_only = True,
 				rename_threshold = 0,
 				print_level = 100,
 			).run()
@@ -742,6 +784,7 @@ class TestSync(unittest.TestCase):
 				dst,
 				delete_files = True,
 				rename_threshold = 0,
+				force_update = True,
 				print_level = 100,
 			).run()
 
@@ -749,3 +792,40 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			self.assertEqual(results[core.RenameFileOperation].success, 1)
 			self.assertEqual(results[core.DeleteFileOperation].success, 1)
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__trash_dir(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+				},
+				"dst": {
+					"a": {
+						"b": None,
+						"c": {
+							"d": None,
+							"e": {
+								"f": None,
+								"g": {
+								},
+							},
+						},
+					},
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				#delete_files = True,
+				trash = "auto",
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))

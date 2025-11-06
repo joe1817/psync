@@ -146,6 +146,8 @@ class CreateFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.src is not None
+		assert self.src.is_relative_to(sync.src)
+		assert self.dst.is_relative_to(sync.dst)
 		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
 
 @dataclass(frozen=True)
@@ -158,6 +160,8 @@ class UpdateFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.src is not None
+		assert self.src.is_relative_to(sync.src)
+		assert self.dst.is_relative_to(sync.dst)
 		_copy(self.src, self.dst, follow_symlinks=sync.follow_symlinks)
 
 @dataclass(frozen=True)
@@ -170,6 +174,8 @@ class RenameFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.target is not None
+		assert self.dst.is_relative_to(sync.dst)
+		assert self.target.is_relative_to(sync.dst)
 		_move(self.dst, self.target)
 
 @dataclass(frozen=True)
@@ -181,6 +187,7 @@ class DeleteFileOperation(Operation):
 		assert self.target is None
 
 	def perform(self, sync:"Sync"):
+		assert self.dst.is_relative_to(sync.dst)
 		self.dst.unlink()
 
 @dataclass(frozen=True)
@@ -193,6 +200,8 @@ class TrashFileOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.target is not None
+		assert self.dst.is_relative_to(sync.dst)
+		assert self.target.is_relative_to(sync.trash)
 		_move(self.dst, self.target)
 
 @dataclass(frozen=True)
@@ -204,6 +213,7 @@ class CreateDirOperation(Operation):
 		assert self.target is None
 
 	def perform(self, sync:"Sync"):
+		assert self.dst.is_relative_to(sync.dst) or (sync.trash and self.dst.is_relative_to(sync.trash))
 		self.dst.mkdir(exist_ok=True, parents=True)
 
 @dataclass(frozen=True)
@@ -215,6 +225,7 @@ class DeleteDirOperation(Operation):
 		assert self.target is None
 
 	def perform(self, sync:"Sync"):
+		assert self.dst.is_relative_to(sync.dst)
 		self.dst.rmdir()
 
 @dataclass(frozen=True)
@@ -227,6 +238,8 @@ class CreateSymlinkOperation(Operation):
 
 	def perform(self, sync:"Sync"):
 		assert self.src is not None
+		assert self.src.is_relative_to(sync.src)
+		assert self.dst.is_relative_to(sync.dst)
 		st = self.src.stat()
 
 		target:str|None

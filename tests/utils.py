@@ -42,7 +42,7 @@ def hash_directory(root:Path, *, follow_symlinks:bool=False, ignore_empty_dirs:b
 		dir_relpath = normcase(relative_to(dir, root))
 		hasher.update(dir_relpath.encode())
 		if verbose:
-			print(dir_relpath)
+			print(" "*dir.count(os.sep) + dir_relpath)
 		for file in filenames:
 			file_path = join(dir, file)
 			file_relpath = str(normcase(relative_to(file_path, root)))
@@ -51,14 +51,14 @@ def hash_directory(root:Path, *, follow_symlinks:bool=False, ignore_empty_dirs:b
 				mtime = str(int(stat(file_path).st_mtime)) # SFTP returns mtime as int
 				hasher.update(mtime.encode())
 			if verbose:
-				print(file_relpath)
+				print(" "*dir.count(os.sep) + file_relpath)
 				if hash_mtime:
-					print(mtime)
+					print(" "*dir.count(os.sep) + mtime)
 			try:
 				if not follow_symlinks and islink(file_path):
 					target = readlink(file_path) or ""
 					if verbose:
-						print(target)
+						print(" "*dir.count(os.sep) + target)
 					target = target.replace("\\", "/") # not perfect, but good enough
 					hasher.update(target.encode()) # can't set mtime for symlinks on Windows, just ignore it here
 				else:

@@ -48,10 +48,15 @@ class TestSync(unittest.TestCase):
 			sync.no_create = False
 			self.assertEqual(sync.no_create, False)
 
-			sync.force_update = True
-			self.assertEqual(sync.force_update, True)
-			sync.force_update = False
-			self.assertEqual(sync.force_update, False)
+			sync.force = True
+			self.assertEqual(sync.force, True)
+			sync.force = False
+			self.assertEqual(sync.force, False)
+
+			sync.global_renames = True
+			self.assertEqual(sync.global_renames, True)
+			sync.global_renames = False
+			self.assertEqual(sync.global_renames, False)
 
 			sync.metadata_only = True
 			self.assertEqual(sync.metadata_only, True)
@@ -364,7 +369,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				trash = "auto",
-				force_update = True,
+				force = True,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -376,7 +381,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				force_update = True,
+				force = True,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -489,7 +494,7 @@ class TestSync(unittest.TestCase):
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-	def test_run__no_force_update(self):
+	def test_run__no_force(self):
 		# test backup involving many overlapping file names
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
@@ -568,7 +573,7 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(hash_directory(dst), hash_directory(expected))
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-	def test_run__force_update(self):
+	def test_run__force(self):
 		# test backup involving many overlapping file names
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
@@ -639,7 +644,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				trash = "auto",
-				force_update = True,
+				force = True,
 				print_level = 100,
 			).run()
 
@@ -784,7 +789,7 @@ class TestSync(unittest.TestCase):
 				dst,
 				delete_files = True,
 				rename_threshold = 0,
-				force_update = True,
+				force = True,
 				print_level = 100,
 			).run()
 
@@ -829,3 +834,76 @@ class TestSync(unittest.TestCase):
 
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertEqual(hash_directory(src), hash_directory(dst))
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__global_renames(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a": ("a", 1),
+					"b": ("b", 2),
+					"d": {
+						"c": ("c", 3),
+					},
+
+					"m": ("m", 4),
+					"p": {
+						"q": ("q", 5),
+					},
+
+					"r": {
+						"s": ("s", 6),
+					},
+
+					"t": {
+						"1": ("t1", 7),
+						"2": ("t2", 8),
+					},
+
+					"x": {
+						"y": ("y", 9),
+					},
+				},
+				"dst": {
+					"a2": ("a", 1),
+					"d2": {
+						"b2": ("b", 2),
+					},
+					"c2": ("c", 3),
+
+					"m": {
+						"n": ("m", 4),
+					},
+					"p": ("q", 5),
+
+					"r": None,
+					"s": ("s", 6),
+
+					"u": {
+						"1": ("t1", 7),
+						"2": ("t2", 8),
+					},
+
+					"x": ("y", 9),
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				delete_files = True,
+				force = True, # TODO force_replace in the future
+				global_renames = True,
+				rename_threshold = 0,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))
+			self.assertEqual(sum(results[core.CreateFileOperation]), 0)
+			self.assertEqual(sum(results[core.DeleteFileOperation]), 1) # r

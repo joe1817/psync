@@ -8,9 +8,11 @@ import stat
 import shutil
 import logging
 import tempfile
+import uuid
 from enum import Enum
 from pathlib import Path, PurePath, PureWindowsPath, PurePosixPath
 from itertools import islice
+from functools import cmp_to_key
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Literal, Iterator, Counter as CounterType, cast
@@ -49,13 +51,15 @@ class _Relpath:
 			self.norm = tuple(relpath.split(in_sep))
 			self.name = self.norm[-1]
 
+		self._hash = hash(self.norm)
+
 		assert ".." not in self.norm
 
 	def __eq__(self, other):
 		return self.norm == other.norm
 
 	def __hash__(self):
-		return hash(self.norm)
+		return self._hash
 
 	def __bool__(self):
 		return bool(self.relpath)
@@ -457,7 +461,8 @@ class Sync:
 		"trash",
 		"delete_files",
 		"no_create",
-		"force_update",
+		"force",
+		"global_renames",
 		"metadata_only",
 		"rename_threshold",
 		"translate_symlinks",
@@ -487,7 +492,8 @@ class Sync:
 			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
 			delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst` but not `src`). Mutually exclusive with `trash`. (Defaults to `False`.)
 			no_create         (bool) : Whether to prevent the creation of any files or directories in `dst`. (Defaults to `False`.)
-			force_update      (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`, and it will allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
+			force             (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`, and it will allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
+			global_renames    (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
 			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
 
@@ -514,7 +520,8 @@ class Sync:
 		self._trash            : PathType|None = None
 		self._delete_files     : bool = False
 		self._no_create        : bool = False
-		self._force_update     : bool = False
+		self._force            : bool = False
+		self._global_renames   : bool = False
 		self._metadata_only    : bool = False
 		self._rename_threshold : int|None = 10000
 		self._translate_symlinks : bool = True
@@ -600,7 +607,7 @@ class Sync:
 			raise ValueError(f"'src' does not exist: {val}")
 
 		src = src.resolve()
-	
+
 		if hasattr(self, "_dst") and self.dst:
 			err = None
 			if src == self.dst:
@@ -798,17 +805,30 @@ class Sync:
 		self._no_create = val
 
 	@property
-	def force_update(self) -> bool:
-		return self._force_update
+	def force(self) -> bool:
+		return self._force
 
-	@force_update.setter
-	def force_update(self, val:bool) -> None:
+	@force.setter
+	def force(self, val:bool) -> None:
 		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
 			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
 
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'force_update' (expected bool): {val}")
-		self._force_update = val
+			raise TypeError(f"Bad type for property 'force' (expected bool): {val}")
+		self._force = val
+
+	@property
+	def global_renames(self) -> bool:
+		return self._global_renames
+
+	@global_renames.setter
+	def global_renames(self, val:bool) -> None:
+		if self._state == Sync._SyncState.RUNNING or self._state == Sync._SyncState.TERMINATED:
+			raise ImmutableObjectError("Cannot modify Sync object after calling run().")
+
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'global_renames' (expected bool): {val}")
+		self._global_renames = val
 
 	@property
 	def metadata_only(self) -> bool:
@@ -1014,14 +1034,18 @@ class Sync:
 			assert self.log_file
 			_replace(self._tmp_log_file, self.log_file)
 
-	def _walk(self, root:PathType) -> Iterator[tuple[PathType, list[os.DirEntry|RemotePath], list[os.DirEntry|RemotePath]]]:
+	def _scandir(self, root:PathType) -> Iterator[tuple[_Dir, list[_Dir], list[_File], int, dict[_File, _Metadata], set[int]]]:
 		stack        : list[Any] = [root]
 		visited_dirs : set[str]  = set()
 
 		assert not isinstance(root, str)
 
+		filter = self.filter.filter
+		src_root_name = root.name + self.in_sep if self.trash else ""
+
 		while stack:
 			parent = stack.pop()
+			self.logger.debug(f"scanning: {parent}")
 
 			if self.follow_symlinks:
 				if isinstance(parent, str):
@@ -1062,28 +1086,10 @@ class Sync:
 				self.logger.warning(_exc_summary(e))
 				continue
 
+			dir_size = len(file_entries) + len(dir_entries)
+
 			dir_entries.sort(key = lambda x: x.name)
 			#file_entries.sort(key = lambda x: x.name)
-
-			yield parent, dir_entries, file_entries
-
-			# Traverse into sub-directories
-			for d in reversed(dir_entries):
-				# in case dir symlink status changed after yield
-				new_path = parent / d.name
-				if self.follow_symlinks or not new_path.is_symlink():
-					stack.append(new_path)
-
-	def _scandir(self, root:PathType) -> Iterator[tuple[_Dir, list[_Dir], list[_File], int, dict[_File, _Metadata], set[int]]]:
-		'''Retrieves file information for all files under `root`, including relative paths, sizes, and mtimes.'''
-
-		filter = self.filter.filter
-		src_root_name = root.name + self.in_sep if self.trash else ""
-
-		for parent, dir_entries, file_entries in self._walk(root):
-			self.logger.debug(f"scanning: {parent}")
-
-			dir_size = len(file_entries) + len(dir_entries)
 
 			# prune dirs
 			dirs = []
@@ -1170,6 +1176,13 @@ class Sync:
 				del dir_entries[i - num_deleted]
 				num_deleted += 1
 
+			# Traverse into sub-directories
+			for d in reversed(dir_entries):
+				# in case dir symlink status changed after yield
+				new_path = parent / d.name
+				if self.follow_symlinks or not new_path.is_symlink():
+					stack.append(new_path)
+
 	def _dir_diff(self, comp, src_entries, dst_entries) -> tuple[
 		_Dir,
 		dict[_File, _Metadata],
@@ -1180,8 +1193,8 @@ class Sync:
 		set[_File],
 		dict[_Dir, _Dir],
 		dict[_File, _File],
-		dict[_File, _File],
-		list[list[list[_File]]],
+		set[int],
+		set[int],
 	]: # TODO return namedtuple
 		'''Returns a tuple of the differences between of two directories.'''
 
@@ -1199,14 +1212,13 @@ class Sync:
 		dst_only_dirs: set[_Dir] = set()
 		src_only_files: set[_File] = set()
 		dst_only_files: set[_File] = set()
-		file_matches: dict[_File, _File] = {}
 		dir_matches: dict[_Dir, _Dir] = {}
-		rename_map: dict[_File, _File] = {}
-		rename_cycles: list[list[list[_File]]] = []
+		file_matches: dict[_File, _File] = {}
+		ignored_src_entries = set()
+		ignored_dst_entries = set()
 
-		src_root_name = self.src.name + self.out_sep if self.trash else ""
-		dst_root_name = self.dst.name + self.out_sep if self.trash else ""
-		trash_root_name = self.trash.name + self.out_sep if self.trash else ""
+		src_root_name = self.src.name + self.out_sep
+		dst_root_name = self.dst.name + self.out_sep
 
 		if comp == -1:
 			for s in src_dirs:
@@ -1215,6 +1227,12 @@ class Sync:
 				src_only_files.add(f)
 
 		elif comp == 0:
+			# strong match = file names match exactly
+			# weak match = file names match after normalizing case
+			# a dir/file can have at most one strong match, and it will always be chosen with priority
+			# a dir/file can have multiple weak matches
+			# a weak match will be be chosen if there is only one and there is no strong match
+			# if there is no chosen match, then the file is ignored, along with all weak matches to it
 
 			existing_dst: dict[_Relpath, list[_Relpath]] = {}
 			new_dst: dict[_Relpath, list[_Relpath]] = {}
@@ -1241,9 +1259,6 @@ class Sync:
 					except KeyError:
 						new_dst[f] = [f]
 
-			ignored_src_entries = set()
-			ignored_dst_entries = set()
-
 			for dst_entry, matches in existing_dst.items():
 				type_entry = type(dst_entry)
 				strong_match = None
@@ -1251,7 +1266,7 @@ class Sync:
 				reject_dst = False
 				reject_src = set()
 				for match in matches:
-					if type_entry != type(match) and not self.force_update:
+					if type_entry != type(match) and not self.force:
 						reject_dst = True
 						break
 					elif dst_entry.name == match.name:
@@ -1324,100 +1339,6 @@ class Sync:
 					else:
 						src_only_files.add(dst_entry)
 
-			# Determine file renames
-			if self.rename_threshold is not None:
-				'''
-				src_meta_to_relpath: dict[_Metadata, _File|None] = {}
-				dst_meta_to_relpath: dict[_Metadata, _File|None] = {}
-
-				for comp, s, d in _merge_iters(set_src_files, set_dst_files):
-					if comp == -1:
-						if s.meta in src_meta_to_relpath:
-							src_meta_to_relpath[s.meta] = None
-						else:
-							src_meta_to_relpath[s.meta] = s
-					if comp == 1:
-						if d.meta in dst_meta_to_relpath:
-							dst_meta_to_relpath[d.meta] = None
-						else:
-							dst_meta_to_relpath[d.meta] = d
-				'''
-				src_meta_to_relpath = _reverse_dict({k:v for k,v in src_file_metadata.items() if id(k) not in ignored_src_entries})
-				dst_meta_to_relpath = _reverse_dict({k:v for k,v in dst_file_metadata.items() if id(k) not in ignored_dst_entries})
-
-				unique_src = set(k for k,v in src_meta_to_relpath.items() if v is not None and k.size >= self.rename_threshold)
-				unique_dst = set(k for k,v in dst_meta_to_relpath.items() if v is not None and k.size >= self.rename_threshold)
-				matched_meta = unique_src.intersection(unique_dst)
-
-				for meta in matched_meta:
-					src_file = src_meta_to_relpath[meta]
-					dst_file = dst_meta_to_relpath[meta]
-
-					if src_file == dst_file:
-						continue
-
-					assert src_file is not None
-					assert dst_file is not None
-
-					# Ignore if last 1kb do not match
-					if not self.metadata_only:
-						try:
-							if not _last_bytes(self.src / src_file) == _last_bytes(self.dst / dst_file):
-								continue
-						except OSError as e:
-							self.logger.warning(_exc_summary(e))
-							continue
-
-					rename_map[dst_file] = src_file
-
-				# find rename chains/cycles from map
-				handled_renames = set()
-				for rename_from in rename_map:
-					if rename_from in handled_renames:
-						continue
-					rename_cycle: list[list[_File]] = []
-					first = rename_from
-
-					# get chain/cycle if it exists
-					while True:
-						handled_renames.add(rename_from)
-						if rename_from not in rename_map:
-							rename_cycle = []
-							break
-
-						rename_to = rename_map[rename_from]
-						rename_cycle.append([rename_from, rename_to])
-
-						if rename_to in src_only_files:
-							rename_cycle = list(reversed(rename_cycle))
-							break
-						elif rename_to == first:
-							rename_cycle[-1][1] = rename_to + ".tempcopy"
-							rename_cycle = list(reversed(rename_cycle))
-							rename_cycle.append([rename_to + ".tempcopy", rename_to])
-							break
-
-						rename_from = rename_to
-
-					# remove renamed files from other collections
-					if rename_cycle:
-						rename_cycles.append(rename_cycle)
-						for cycle in rename_cycles:
-							for step in cycle:
-								rename_from, rename_to = step[0], step[1]
-								try:
-									dst_only_files.remove(rename_from)
-								except KeyError:
-									pass
-								try:
-									del file_matches[rename_from]
-								except KeyError:
-									pass
-								try:
-									src_only_files.remove(rename_to)
-								except KeyError:
-									pass
-
 		else:
 			# dst dir needs to be deleted
 			for d in dst_dirs:
@@ -1455,9 +1376,42 @@ class Sync:
 			dst_only_files,
 			dir_matches,
 			file_matches,
-			rename_map,
-			rename_cycles,
+			ignored_src_entries,
+			ignored_dst_entries,
 		)
+
+	def _get_rename_map(self, src_file_metadata, dst_file_metadata, ignored_src_entries, ignored_dst_entries) -> dict[_File, _File]:
+		rename_map: dict[_File, _File] = {}
+		rename_cycles: list[list[list[_File]]] = []
+
+		src_meta_to_relpath = _reverse_dict({k:v for k,v in src_file_metadata.items() if id(k) not in ignored_src_entries})
+		dst_meta_to_relpath = _reverse_dict({k:v for k,v in dst_file_metadata.items() if id(k) not in ignored_dst_entries})
+
+		unique_src = set(k for k,v in src_meta_to_relpath.items() if v is not None and k.size >= self.rename_threshold)
+		unique_dst = set(k for k,v in dst_meta_to_relpath.items() if v is not None and k.size >= self.rename_threshold)
+		matched_meta = unique_src.intersection(unique_dst)
+
+		for meta in matched_meta:
+			src_file = src_meta_to_relpath[meta]
+			dst_file = dst_meta_to_relpath[meta]
+
+			if src_file == dst_file:
+				continue
+
+			assert src_file is not None
+			assert dst_file is not None
+
+			# Ignore if last 1kb do not match
+			if not self.metadata_only:
+				try:
+					if not _last_bytes(self.src / src_file) == _last_bytes(self.dst / dst_file):
+						continue
+				except OSError as e:
+					self.logger.warning(_exc_summary(e))
+					continue
+
+			rename_map[dst_file] = src_file
+		return rename_map
 
 	def _operations(self) -> Iterator[Operation]:
 		src_root_name = self.src.name + self.out_sep if self.trash else ""
@@ -1530,7 +1484,7 @@ class Sync:
 			if src_time > dst_time:
 				do_update = True
 			elif src_time < dst_time:
-				if self.force_update:
+				if self.force:
 					do_update = True
 				else:
 					self.logger.warning(f"'dst' file is newer than 'src' file: {dst_root_name}{dst_relpath}")
@@ -1549,7 +1503,55 @@ class Sync:
 						summary   = f"R {src_root_name}{src_relpath} -> {dst_root_name}{dst_relpath}",
 					)
 
-		def _rename_ops(rename_cycles: list[list[list[_File]]]) -> Iterator[Operation]:
+		def _rename_ops(rename_map, src_only_files, file_matches, dst_only_files, dst_only_dirs) -> Iterator[Operation]:
+			rename_cycles = []
+			handled_renames = set()
+			for rename_from in rename_map:
+				if rename_from in handled_renames:
+					continue
+				cycle: list[list[_File]] = []
+				first = rename_from
+
+				# get chain/cycle if it exists
+				while True:
+					handled_renames.add(rename_from)
+					if rename_from not in rename_map:
+						cycle = []
+						break
+
+					rename_to = rename_map[rename_from]
+					cycle.append([rename_from, rename_to])
+
+					if rename_to in src_only_files:
+						cycle = list(reversed(cycle))
+						break
+					elif rename_to == first or (self.global_renames and rename_to in dst_only_dirs):
+						cycle[-1][1] = rename_to + ".tempcopy"
+						cycle = list(reversed(cycle))
+						cycle.append([rename_to + ".tempcopy", rename_to])
+						break
+
+					rename_from = rename_to
+
+				# remove renamed files from other collections
+				if cycle:
+					rename_cycles.append(cycle)
+					#for cycle in rename_cycles:
+					for step in cycle:
+						rename_from, rename_to = step[0], step[1]
+						try:
+							src_only_files.remove(rename_to)
+						except KeyError:
+							pass
+						try:
+							del file_matches[rename_from]
+						except KeyError:
+							pass
+						try:
+							dst_only_files.remove(rename_from)
+						except KeyError:
+							pass
+
 			for cycle in rename_cycles:
 				for step in cycle:
 					rename_from, rename_to = step[0], step[1]
@@ -1559,95 +1561,245 @@ class Sync:
 						summary   = f"R {dst_root_name}{rename_from} -> {dst_root_name}{rename_to}",
 					)
 
-		deleting_dirs_under = None
+		if self.global_renames:
 
-		# yield after exiting this directory
-		# delete ops always need to be yielded after this dir
-		# other ops only need to be yielded after this dir if there are delete ops
-		delete_after: list[Operation] = []
-		create_after: list[Operation] = []
-		update_after: list[Operation] = []
-		rename_after: list[Operation] = []
+			deletes: list[Operation] = []
+			creates: list[Operation] = []
+			updates: list[Operation] = []
+			renames: list[Operation] = []
 
-		for comp, src_entries, dst_entries in _merge_iters(src_iter, dst_iter, key=lambda x: x[0]):
-			(
-				parent_dir,
-				src_file_metadata,
-				dst_file_metadata,
-				src_only_dirs,
-				dst_only_dirs,
-				src_only_files,
-				dst_only_files,
-				dir_matches,
-				file_matches,
-				rename_map,
-				rename_cycles,
-			) = self._dir_diff(comp, src_entries, dst_entries)
+			all_src_file_metadata = {}
+			all_dst_file_metadata = {}
+			all_src_only_dirs = set()
+			all_dst_only_dirs = set()
+			all_src_only_files = set()
+			all_dst_only_files = set()
+			all_dir_matches = {}
+			all_file_matches = {}
+			all_ignored_src_entries = set()
+			all_ignored_dst_entries = set()
 
-			delete_now: list[Operation] = []
-			create_now: list[Operation] = []
-			update_now: list[Operation] = []
-			rename_now: list[Operation] = []
+			for comp, src_entries, dst_entries in _merge_iters(src_iter, dst_iter, key=lambda x: x[0]):
+				(
+					parent_dir,
+					src_file_metadata,
+					dst_file_metadata,
+					src_only_dirs,
+					dst_only_dirs,
+					src_only_files,
+					dst_only_files,
+					dir_matches,
+					file_matches,
+					ignored_src_entries,
+					ignored_dst_entries,
+				) = self._dir_diff(comp, src_entries, dst_entries)
 
-			if deleting_dirs_under and not parent_dir.is_relative_to(deleting_dirs_under):
-				yield from sorted(delete_after) # reversed(delete_after) should also work
-				yield from sorted(create_after)
-				yield from sorted(update_after)
-				yield from rename_after
-				delete_after = []
-				create_after = []
-				update_after = []
-				rename_after = []
-				deleting_dirs_under = None
+				all_src_file_metadata.update(src_file_metadata)
+				all_dst_file_metadata.update(dst_file_metadata)
+				all_src_only_dirs.update(src_only_dirs)
+				all_dst_only_dirs.update(dst_only_dirs)
+				all_src_only_files.update(src_only_files)
+				all_dst_only_files.update(dst_only_files)
+				all_dir_matches.update(dir_matches)
+				all_file_matches.update(file_matches)
 
-			if dst_only_dirs and deleting_dirs_under is None:
-			#if deleting_dirs_under is None and (any(f in dst_only_dirs for f in src_only_files) or any(d in dst_only_dirs for d in src_only_dirs)):
-				deleting_dirs_under = parent_dir
-
-			if deleting_dirs_under:
-				deletes = delete_after
-				creates = create_after
-				updates = update_after
-				renames = rename_after
-			else:
-				deletes = delete_now
-				creates = create_now
-				updates = update_now
-				renames = rename_now
+			rename_map = self._get_rename_map(all_src_file_metadata, all_dst_file_metadata, all_ignored_src_entries, all_ignored_dst_entries)
 
 			# renames
-			renames.extend(_rename_ops(rename_cycles))
+			# TODO currently this is just used to remove entries from other collections
+			renames.extend(_rename_ops(rename_map, all_src_only_files, all_file_matches, all_dst_only_files, all_dst_only_dirs))
+
+			'''
+			print(f"{all_src_file_metadata=}")
+			print(f"{all_dst_file_metadata=}")
+			print(f"{all_src_only_dirs=}")
+			print(f"{all_dst_only_dirs=}")
+			print(f"{all_src_only_files=}")
+			print(f"{all_dst_only_files=}")
+			print(f"{all_dir_matches=}")
+			print(f"{all_file_matches=}")
+			'''
 
 			# deletes
-			for d in dst_only_dirs:
-				deletes.extend(_delete_ops(d, None))
-			for f in dst_only_files:
-				deletes.extend(_delete_ops(f, dst_file_metadata))
+			if self.delete_files or self.trash:
+				for d in all_dst_only_dirs:
+					deletes.extend(_delete_ops(d, None))
+				for f in all_dst_only_files:
+					deletes.extend(_delete_ops(f, all_dst_file_metadata))
+
+			# updates
+			for s, d in all_file_matches.items():
+				updates.extend(_update_ops(s, d, all_src_file_metadata, all_dst_file_metadata))
 
 			# creates
 			if not self.no_create:
-				for s in src_only_dirs:
+				for s in all_src_only_dirs:
 					creates.extend(_create_ops(s, None))
-				for s in src_only_files:
-					creates.extend(_create_ops(s, src_file_metadata))
+				for s in all_src_only_files:
+					creates.extend(_create_ops(s, all_src_file_metadata))
 
-			# updates
-			for s, d in file_matches.items():
-				updates.extend(_update_ops(s, d, src_file_metadata, dst_file_metadata))
+			# TODO combine rename ops into rename dir ops
 
 			# TODO combine delete/trash ops into trash/delete dir ops
 			# dir_size would be needed for this
 
-			yield from sorted(delete_now)
-			yield from sorted(create_now)
-			yield from sorted(update_now)
-			yield from rename_now
+			def deepest_first(x, y):
+				if x == y:
+					return 0
+				elif x.is_relative_to(y) or x < y:
+					return -1
+				else:
+					return 1
 
+			deletes.sort()
+			updates.sort()
+			creates.sort()
 
-		yield from sorted(delete_after) # reversed(delete_after) should also work
-		yield from sorted(create_after)
-		yield from sorted(update_after)
-		yield from rename_after
+			delete_keys = list(op.dst for op in deletes)
+			rename_keys = sorted((entry for entry in rename_map), key=cmp_to_key(deepest_first))
+
+			delete_index = 0
+			rename_index = 0
+			while delete_index < len(delete_keys) or rename_index < len(rename_keys):
+				try:
+					d = delete_keys[delete_index]
+				except IndexError:
+					d = None
+				try:
+					r = rename_keys[rename_index]
+				except IndexError:
+					r = None
+
+				yield_d = False
+				yield_r = False
+				if d is None:
+					yield_r = True
+				elif r is None:
+					yield_d = True
+				elif r.is_relative_to(d) or r < d:
+					yield_r = True
+				else:
+					yield_d = True
+
+				if yield_d:
+					yield deletes[delete_index]
+					delete_index += 1
+
+				if yield_r:
+					rename_to = rename_map[r]
+					if rename_to.is_relative_to(r) or any(rename_to.is_relative_to(d2) for d2 in delete_keys[delete_index:]): # TODO use priority queue
+						old_rename_to = rename_to
+						rename_to = type(rename_to)(str(uuid.uuid4()).replace("-","") + ".tempcopy", rename_to.in_sep, rename_to.out_sys)
+						rename_map[rename_to] = old_rename_to
+						rename_keys.append(rename_to) # TODO use priority queue
+					elif rename_to in rename_map:
+						old_rename_to = rename_to
+						rename_to += ".tempcopy"
+						rename_map[rename_to] = old_rename_to
+						rename_keys.append(rename_to)
+					yield RenameFileOperation(
+						dst     = r,
+						target  = rename_to,
+						summary = f"R {dst_root_name}{r} -> {dst_root_name}{rename_to}",
+					)
+					rename_index += 1
+
+			yield from updates
+			yield from creates
+
+		else:
+
+			deleting_dirs_under = None
+
+			# yield after exiting this directory
+			# delete ops always need to be yielded after this dir
+			# other ops only need to be yielded after this dir if there are delete ops
+			delete_after: list[Operation] = []
+			update_after: list[Operation] = []
+			create_after: list[Operation] = []
+			rename_after: list[Operation] = []
+
+			for comp, src_entries, dst_entries in _merge_iters(src_iter, dst_iter, key=lambda x: x[0]):
+				(
+					parent_dir,
+					src_file_metadata,
+					dst_file_metadata,
+					src_only_dirs,
+					dst_only_dirs,
+					src_only_files,
+					dst_only_files,
+					dir_matches,
+					file_matches,
+					ignored_src_entries,
+					ignored_dst_entries,
+				) = self._dir_diff(comp, src_entries, dst_entries)
+
+				rename_map = self._get_rename_map(src_file_metadata, dst_file_metadata, ignored_src_entries, ignored_dst_entries)
+
+				delete_now: list[Operation] = []
+				update_now: list[Operation] = []
+				create_now: list[Operation] = []
+				rename_now: list[Operation] = []
+
+				if deleting_dirs_under and not parent_dir.is_relative_to(deleting_dirs_under):
+					yield from sorted(delete_after) # reversed(delete_after) should also work
+					yield from sorted(update_after)
+					yield from sorted(create_after)
+					yield from rename_after
+					delete_after = []
+					update_after = []
+					create_after = []
+					rename_after = []
+					deleting_dirs_under = None
+
+				if dst_only_dirs and deleting_dirs_under is None:
+				#if deleting_dirs_under is None and (any(f in dst_only_dirs for f in src_only_files) or any(d in dst_only_dirs for d in src_only_dirs)):
+					deleting_dirs_under = parent_dir
+
+				if deleting_dirs_under:
+					deletes = delete_after
+					updates = update_after
+					creates = create_after
+					renames = rename_after
+				else:
+					deletes = delete_now
+					updates = update_now
+					creates = create_now
+					renames = rename_now
+
+				# renames
+				renames.extend(_rename_ops(rename_map, src_only_files, file_matches, dst_only_files, dst_only_dirs))
+
+				# deletes
+				if self.delete_files or self.trash:
+					for d in dst_only_dirs:
+						deletes.extend(_delete_ops(d, None))
+					for f in dst_only_files:
+						deletes.extend(_delete_ops(f, dst_file_metadata))
+
+				# updates
+				for s, d in file_matches.items():
+					updates.extend(_update_ops(s, d, src_file_metadata, dst_file_metadata))
+
+				# creates
+				if not self.no_create:
+					for s in src_only_dirs:
+						creates.extend(_create_ops(s, None))
+					for s in src_only_files:
+						creates.extend(_create_ops(s, src_file_metadata))
+
+				# TODO combine delete/trash ops into trash/delete dir ops
+				# dir_size would be needed for this
+
+				yield from sorted(delete_now)
+				yield from sorted(update_now)
+				yield from sorted(create_now)
+				yield from rename_now
+
+			yield from sorted(delete_after) # reversed(delete_after) should also work
+			yield from sorted(update_after)
+			yield from sorted(create_after)
+			yield from rename_after
 
 	def run(self) -> Results:
 		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''
@@ -1660,7 +1812,7 @@ class Sync:
 			FOOTER  = _RecordTag.FOOTER.dict()
 			SYNC_OP = _RecordTag.SYNC_OP.dict()
 
-			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.no_create=}, {self.force_update=}, {self.metadata_only=}, {self.rename_threshold=}, {self.translate_symlinks=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
+			self.logger.debug(f"Starting backup: {self.src=}, {self.dst=}, {self.filter=}, {self.trash=}, {self.delete_files=}, {self.no_create=}, {self.force=}, {self.global_renames=}, {self.metadata_only=}, {self.rename_threshold=}, {self.translate_symlinks=}, {self.ignore_symlinks=}, {self.follow_symlinks=}, {self.dry_run=}, {self.log_file=}, {self.log_level=}, {self.print_level=}, {self.no_header=}, {self.no_footer=}, {self.sftp_compat=}".replace("self.", ""))
 			self.logger.debug("")
 
 			width = max(len(str(self.src)), len(str(self.dst)), 7) + 3

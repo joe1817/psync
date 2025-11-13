@@ -121,15 +121,25 @@ class RemotePath:
 		'''Copy a file where at least one of `src` and `dst` is a `RemotePath` object.'''
 
 		if isinstance(src, RemotePath) and isinstance(dst, RemotePath):
-			try:
-				temp_file_path = None
-				with tempfile.NamedTemporaryFile(delete=False, mode='w+') as temp_file:
-					temp_file_path = Path(temp_file.name)
-				RemotePath._get_file(src, temp_file_path, follow_symlinks=follow_symlinks)
-				RemotePath._put_file(temp_file_path, dst, follow_symlinks=follow_symlinks)
-			finally:
-				if temp_file_path:
-					os.unlink(temp_file_path)
+			if src.conn_details == dst.conn_details:
+				try:
+					ssh = cls.ssh_connections[src.conn_details]
+					stdin, stdout, stderr = ssh.exec_command(f"cp {'' if follow_symlinks else '-P'} {str(src)} {str(dst)}")
+					err = stderr.read().decode().strip()
+					if err:
+						raise OSError(1, err, str(src))
+				except paramiko.ssh_exception.SSHException:
+					raise OSError(1, "Connection error", str(src))
+			else:
+				try:
+					temp_file_path = None
+					with tempfile.NamedTemporaryFile(delete=False, mode='w+') as temp_file:
+						temp_file_path = Path(temp_file.name)
+					RemotePath._get_file(src, temp_file_path, follow_symlinks=follow_symlinks)
+					RemotePath._put_file(temp_file_path, dst, follow_symlinks=follow_symlinks)
+				finally:
+					if temp_file_path:
+						os.unlink(temp_file_path)
 		elif isinstance(src, RemotePath):
 			RemotePath._get_file(src, dst, follow_symlinks=follow_symlinks)
 		elif isinstance(dst, RemotePath):

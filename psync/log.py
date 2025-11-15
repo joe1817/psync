@@ -2,6 +2,13 @@ import sys
 import logging
 from enum import Enum
 
+# Summary of logging levels used in this package:
+# DEBUG    = useful for finding bugs
+# INFO     = operation performed, no problems encountered
+# WARNING  = problem encountered but the operation completed
+# ERROR    = problem encountered and the operation failed
+# CRITICAL = Exception raised which halted the program entirely
+
 def _exc_summary(e) -> str:
 	'''Get a one-line summary of an `Exception`.'''
 

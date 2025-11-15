@@ -51,7 +51,7 @@ class _Relpath:
 			self.norm = tuple(relpath.split(in_sep))
 			self.name = self.norm[-1]
 
-		self._hash = hash(self.norm)
+		self._norm_hash = hash(self.norm)
 
 		assert ".." not in self.norm
 
@@ -59,7 +59,7 @@ class _Relpath:
 		return self.norm == other.norm
 
 	def __hash__(self):
-		return self._hash
+		return self._norm_hash
 
 	def __bool__(self):
 		return bool(self.relpath)
@@ -101,6 +101,30 @@ class _Dir(_Relpath):
 
 	#def __len__(self):
 	#	return self.num_files + self.num_dirs
+
+Diff = namedtuple("Diff", [
+	"src_parent",
+	"dst_parent",
+	"src_file_metadata",
+	"dst_file_metadata",
+	"src_only_dirs",
+	"dst_only_dirs",
+	"src_only_files",
+	"dst_only_files",
+	"dir_matches",
+	"file_matches",
+	"ignored_src_entries",
+	"ignored_dst_entries",
+])
+
+DirList = namedtuple("DirList", [
+	"parent_dir",
+	"dirs",
+	"files",
+	"dir_size",
+	"file_metadata",
+	"nonstandard_files",
+])
 
 @dataclass(frozen=True)
 class Operation:
@@ -1034,199 +1058,287 @@ class Sync:
 			assert self.log_file
 			_replace(self._tmp_log_file, self.log_file)
 
-	def _scandir(self, root:PathType) -> Iterator[tuple[_Dir, list[_Dir], list[_File], int, dict[_File, _Metadata], set[int]]]:
-		stack        : list[Any] = [root]
-		visited_dirs : set[str]  = set()
+	class _DualWalk:
+		def __init__(self, sync, *, bottom_up_lone_dst=True):
+			self.sync = sync
+			self.bottom_up_lone_dst = bottom_up_lone_dst
+			self.src_dir_sizes = {}
+			self.dst_dir_sizes = {}
+			src_ancestors : set[str] = set()
+			dst_ancestors : set[str] = set()
 
-		assert not isinstance(root, str)
+		def __iter__(self):
+			yield from self.dual_walk(self.sync.src, self.sync.dst)
 
-		filter = self.filter.filter
-		src_root_name = root.name + self.in_sep if self.trash else ""
+		def dual_walk(self, src_path, dst_path, *, _bottom_up=False) -> Iterator[Diff]:
+			# don't follow circular symlinks
+			if self.sync.follow_symlinks:
+				if src_path is not None:
+					src_true_path = str(src_path.resolve())
+					if src_true_path in self.src_ancestors:
+						self.logger.warning(f"Symlink circular reference: {src_path} -> {src_true_path}")
+						return
+					self.src_ancestors.add(src_true_path)
+				if dst_path is not None:
+					dst_true_path = str(dst_path.resolve())
+					if dst_true_path in self.dst_ancestors:
+						self.logger.warning(f"Symlink circular reference: {dst_path} -> {dst_true_path}")
+						return
+					self.dst_ancestors.add(dst_true_path)
 
-		while stack:
-			parent = stack.pop()
-			self.logger.debug(f"scanning: {parent}")
-
-			if self.follow_symlinks:
-				if isinstance(parent, str):
-					visited_dirs.remove(parent)
-					continue
-				d = str(parent.resolve())
-				if d in visited_dirs:
-					self.logger.warning(f"Symlink circular reference: {parent} -> {d}")
-					continue
-				stack.append(d)
-				visited_dirs.add(d)
-
-			assert not isinstance(parent, str)
-
-			dir_entries    = []
-			file_entries = []
+			self.sync.logger.debug(f"scanning: {src_path}")
+			self.sync.logger.debug(f"scanning: {dst_path}")
 
 			try:
-				scanner = _RemotePathScanner(parent) if isinstance(parent, RemotePath) else os.scandir(parent)
-				with scanner as entries:
-					for entry in entries:
-						try:
-							if self.ignore_symlinks and entry.is_symlink():
-								continue
-							if self.follow_symlinks:
-								is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
-							else:
-								is_dir = entry.is_dir(follow_symlinks=False)
-						except OSError as e:
-							self.logger.warning(_exc_summary(e))
-							continue
-						if is_dir:
-							dir_entries.append(entry)
-						else:
-							file_entries.append(entry)
+				src_list = self.dir_list(src_path, self.sync.src)
 			except OSError as e:
-				# parent does not exist or user has no read access
-				self.logger.warning(_exc_summary(e))
-				continue
+				# no read access
+				# TODO tally_failure in Results, would need to do so without an Operation
+				self.sync.logger.error(_exc_summary(e))
+				return
+			try:
+				dst_list = self.dir_list(dst_path, self.sync.dst)
+			except OSError as e:
+				self.sync.logger.error(_exc_summary(e))
+				return
 
-			dir_size = len(file_entries) + len(dir_entries)
+			src_parent_dir, src_dirs, src_files, src_dir_size, src_file_metadata, src_nonstandard = src_list
+			dst_parent_dir, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, dst_nonstandard = dst_list
 
-			dir_entries.sort(key = lambda x: x.name)
+			if src_parent_dir:
+				self.src_dir_sizes[src_parent_dir] = src_dir_size
+			if dst_parent_dir:
+				self.dst_dir_sizes[dst_parent_dir] = dst_dir_size
+
+			# don't try to update a nonstandard file (socket, named pipe, etc)
+			for f in src_nonstandard:
+				try:
+					dst_files.remove(f)
+				except KeyError:
+					pass
+			for f in dst_nonstandard:
+				try:
+					src_files.remove(f)
+				except KeyError:
+					pass
+
+			diff = self.dir_diff(src_list, dst_list)
+
+			# TODO remove ignored files from metadata dict, don't pass 'ignored' lists to _rename_ops
+
+			if _bottom_up:
+				for relpath in diff.dst_only_dirs:
+					yield from self.dual_walk(None, self.sync.dst/relpath, _bottom_up=_bottom_up)
+				for src_relpath, dst_relpath in diff.dir_matches.items():
+					yield from self.dual_walk(self.sync.src/src_relpath, self.sync.dst/dst_relpath, _bottom_up=_bottom_up)
+				for relpath in diff.src_only_dirs:
+					yield from self.dual_walk(self.sync.src/relpath, None, _bottom_up=_bottom_up)
+				# TODO yield DualWalkNode object continaing diff, send data structs for other nodes, callbacks for received data
+				yield diff
+			else:
+				if self.bottom_up_lone_dst:
+					for relpath in diff.dst_only_dirs:
+						yield from self.dual_walk(None, self.sync.dst/relpath, _bottom_up=True)
+					yield diff
+				else:
+					yield diff
+					for relpath in diff.dst_only_dirs:
+						yield from self.dual_walk(None, self.sync.dst/relpath, _bottom_up=True)
+				for src_relpath, dst_relpath in diff.dir_matches.items():
+					yield from self.dual_walk(self.sync.src/src_relpath, self.sync.dst/dst_relpath)
+				for relpath in diff.src_only_dirs:
+					yield from self.dual_walk(self.sync.src/relpath, None)
+
+			# TODO dw_node.child_data_handler(dw_node.data_for_parent)
+
+			if self.sync.follow_symlinks:
+				if src_path is not None:
+					self.src_ancestors.remove(src_true_path)
+				if dst_path is not None:
+					self.dst_ancestors.remove(dst_true_path)
+
+		def dir_list(self, dir, root):
+			'''Returns a tuple of the contents of a directory.'''
+
+			try:
+				if dir is None:
+					raise FileNotFoundError()
+				scanner = _RemotePathScanner(dir) if isinstance(dir, RemotePath) else os.scandir(dir)
+			except FileNotFoundError:
+				return DirList(
+					parent_dir = None,
+					dirs = [], # empty data structs are better for updating/extending than None
+					files = [],
+					dir_size = 0,
+					file_metadata = {},
+					nonstandard_files = [],
+				)
+
+			dir_entries = []
+			file_entries = []
+			nonstandard_entries = []
+			dir_size = 0
+
+			with scanner as entries:
+				for entry in entries:
+					dir_size += 1
+					try:
+						if self.sync.ignore_symlinks and entry.is_symlink():
+							nonstandard_entries.append(entry)
+							continue
+						if self.sync.follow_symlinks:
+							is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+						else:
+							is_dir = entry.is_dir(follow_symlinks=False)
+					except OSError as e:
+						self.sync.logger.warning(_exc_summary(e))
+						continue
+					if is_dir:
+						dir_entries.append(entry)
+					else:
+						file_entries.append(entry)
+
+			# sorting should not be necessary
+			#dir_entries.sort(key = lambda x: x.name)
 			#file_entries.sort(key = lambda x: x.name)
+
+			filter = self.sync.filter.filter
+			sep = "/" if isinstance(root, RemotePath) else os.sep
+			root_name = (root.name + sep) if self.sync.trash else ""
 
 			# prune dirs
 			dirs = []
-			#dir_metadata = {}
-			i = 0
-			while i < len(dir_entries):
-				entry = dir_entries[i]
+			for entry in dir_entries:
 				dirname = entry.name
-				dir_path = parent / dirname
+				dir_path = dir / dirname
 				dir_relpath = str(_relative_to(dir_path, root))
 
-				if not filter(root, dir_relpath + self.out_sep):
-					del dir_entries[i]
+				if not filter(root, dir_relpath + self.sync.out_sep):
 					continue
 
 				try:
 					d = _Dir(
 						relpath = dir_relpath,
-						in_sep = self.in_sep,
-						out_sys = self.out_sys,
+						in_sep = sep,
+						out_sys = self.sync.out_sys,
 					)
-					d._index = i # for ease of removal in later steps
 				except IncompatiblePathError:
-					self.logger.warning(f"Ignoring incompatible parent: {src_root_name}{dir_relpath}{self.in_sep}")
+					self.sync.logger.warning(f"Ignoring incompatible dir: {root_name}{dir_relpath}{sep}")
 					continue
 
 				dirs.append(d)
-				i += 1
 
 			# prune files
 			files = []
 			file_metadata = {}
-			i = 0
 			for entry in file_entries:
-				# Ignore non-standard files (e.g., sockets, named pipes, block & character devices), except symlinks.
-				if self.follow_symlinks:
+				# Ignore non-standard files (e.g., sockets, named pipes, block & character devices), but allow symlinks.
+				if self.sync.follow_symlinks:
 					if not entry.is_file(follow_symlinks=True):
+						nonstandard_entries.append(entry)
 						continue
 				else:
 					if not entry.is_file(follow_symlinks=False) and not entry.is_symlink():
+						nonstandard_entries.append(entry)
 						continue
 
 				filename = entry.name
-				file_path = parent / filename
+				file_path = dir / filename
 				file_relpath = str(_relative_to(file_path, root))
+
 				try:
 					f = _File(
 						relpath = file_relpath,
-						in_sep = self.in_sep,
-						out_sys = self.out_sys,
+						in_sep = sep,
+						out_sys = self.sync.out_sys,
 					)
 				except IncompatiblePathError as e:
-					self.logger.warning(f"Ignoring incompatible file: {src_root_name}{file_relpath}")
+					self.sync.logger.warning(f"Ignoring incompatible file: {root_name}{file_relpath}")
 					continue
 
-				if filter(root, file_relpath):
-					stat  = entry.stat(follow_symlinks=self.follow_symlinks)
-					size  = stat.st_size
-					mtime = stat.st_mtime
-					if size is None or mtime is None:
-						self.logger.warning(f"Ignoring file with unknown metadata: {src_root_name}{file_relpath}")
-						continue
+				stat  = entry.stat(follow_symlinks=self.sync.follow_symlinks)
+				size  = stat.st_size
+				mtime = stat.st_mtime
+				if size is None or mtime is None:
+					self.sync.logger.warning(f"Ignoring file with unknown metadata: {root_name}{file_relpath}")
+					continue
 
-					if self.sftp_compat:
-						mtime = float(int(mtime))
+				if self.sync.sftp_compat:
+					mtime = float(int(mtime))
 
-					files.append(f)
-					file_metadata[f] = _Metadata(size=size, mtime=mtime)
-					i += 1
+				files.append(f)
+				file_metadata[f] = _Metadata(size=size, mtime=mtime)
 
-			parent_relpath = str(_relative_to(parent, root))
+			nonstandard_files = []
+			for entry in nonstandard_entries:
+				filename = entry.name
+				file_path = dir / filename
+				file_relpath = str(_relative_to(file_path, root))
+
+				if not filter(root, file_relpath):
+					continue
+
+				try:
+					f = _File(
+						relpath = file_relpath,
+						in_sep = sep,
+						out_sys = self.sync.out_sys,
+					)
+				except IncompatiblePathError as e:
+					continue
+
+				nonstandard_files.append(f)
+
+			parent_relpath = str(_relative_to(dir, root))
 			parent_dir = _Dir(
 				relpath = parent_relpath,
-				in_sep = self.in_sep,
-				out_sys = self.out_sys,
+				in_sep = sep,
+				out_sys = self.sync.out_sys,
 			)
 
-			rejected: set[int] = set()
-			yield parent_dir, dirs, files, dir_size, file_metadata, rejected
+			return DirList(
+				parent_dir = parent_dir,
+				dirs = dirs,
+				files = files,
+				dir_size = dir_size,
+				file_metadata = file_metadata,
+				nonstandard_files = nonstandard_files,
+			)
 
-			# remove dirs that _operations rejected
-			num_deleted = 0
-			for i in sorted(rejected):
-				del dir_entries[i - num_deleted]
-				num_deleted += 1
+		def dir_diff(self, src_list, dst_list) -> Diff:
+			'''Returns a tuple of the differences between of two directories.'''
 
-			# Traverse into sub-directories
-			for d in reversed(dir_entries):
-				# in case dir symlink status changed after yield
-				new_path = parent / d.name
-				if self.follow_symlinks or not new_path.is_symlink():
-					stack.append(new_path)
+			src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, _ = src_list
+			dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, _ = dst_list
 
-	def _dir_diff(self, comp, src_entries, dst_entries) -> tuple[
-		_Dir,
-		dict[_File, _Metadata],
-		dict[_File, _Metadata],
-		set[_Dir],
-		set[_Dir],
-		set[_File],
-		set[_File],
-		dict[_Dir, _Dir],
-		dict[_File, _File],
-		set[int],
-		set[int],
-	]: # TODO return namedtuple
-		'''Returns a tuple of the differences between of two directories.'''
+			src_only_dirs: set[_Dir] = set()
+			dst_only_dirs: set[_Dir] = set()
+			src_only_files: set[_File] = set()
+			dst_only_files: set[_File] = set()
+			dir_matches: dict[_Dir, _Dir] = {}
+			file_matches: dict[_File, _File] = {}
+			ignored_src_entries = set() # ambiguous src entries
+			ignored_dst_entries = set() # dst entries that are only matched with ambiguous entries
 
-		src_file_metadata: dict[_File, _Metadata] = {}
-		dst_file_metadata: dict[_File, _Metadata] = {}
+			src_root_name = self.sync.src.name + self.sync.in_sep
+			dst_root_name = self.sync.dst.name + self.sync.out_sep
 
-		if src_entries:
-			src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, reject_src_dir = src_entries
-			parent_dir = src_parent
-		if dst_entries:
-			dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, reject_dst_dir = dst_entries
-			parent_dir = dst_parent
+			#if dst_parent is None:
+			#	# src needs to be copied over
+			#	for s in src_dirs:
+			#		src_only_dirs.add(s)
+			#	for f in src_files:
+			#		src_only_files.add(f)
+			#elif src_parent is None:
+			#	# dst dir needs to be deleted
+			#	for d in dst_dirs:
+			#		assert d is not None
+			#		dst_only_dirs.add(d)
+			#	for f in dst_files:
+			#		dst_only_files.add(f)
+			#else:
 
-		src_only_dirs: set[_Dir] = set()
-		dst_only_dirs: set[_Dir] = set()
-		src_only_files: set[_File] = set()
-		dst_only_files: set[_File] = set()
-		dir_matches: dict[_Dir, _Dir] = {}
-		file_matches: dict[_File, _File] = {}
-		ignored_src_entries = set()
-		ignored_dst_entries = set()
-
-		src_root_name = self.src.name + self.out_sep
-		dst_root_name = self.dst.name + self.out_sep
-
-		if comp == -1:
-			for s in src_dirs:
-				src_only_dirs.add(s)
-			for f in src_files:
-				src_only_files.add(f)
-
-		elif comp == 0:
+			# find matches between src and dst
 			# strong match = file names match exactly
 			# weak match = file names match after normalizing case
 			# a dir/file can have at most one strong match, and it will always be chosen with priority
@@ -1234,56 +1346,56 @@ class Sync:
 			# a weak match will be be chosen if there is only one and there is no strong match
 			# if there is no chosen match, then the file is ignored, along with all weak matches to it
 
-			existing_dst: dict[_Relpath, list[_Relpath]] = {}
-			new_dst: dict[_Relpath, list[_Relpath]] = {}
+			in_dst: dict[_Relpath, list[_Relpath]] = {}
+			in_src_only: dict[_Relpath, list[_Relpath]] = {}
 
 			for d in dst_dirs:
-				existing_dst[d] = []
+				in_dst[d] = []
 			for f in dst_files:
-				existing_dst[f] = []
+				in_dst[f] = []
 
 			for d in src_dirs:
 				try:
-					existing_dst[d].append(d)
+					in_dst[d].append(d)
 				except KeyError:
 					try:
-						new_dst[d].append(d)
+						in_src_only[d].append(d)
 					except KeyError:
-						new_dst[d] = [d]
+						in_src_only[d] = [d]
 			for f in src_files:
 				try:
-					existing_dst[f].append(f)
+					in_dst[f].append(f)
 				except KeyError:
 					try:
-						new_dst[f].append(f)
+						in_src_only[f].append(f)
 					except KeyError:
-						new_dst[f] = [f]
+						in_src_only[f] = [f]
 
-			for dst_entry, matches in existing_dst.items():
+			for dst_entry, matches in in_dst.items():
 				type_entry = type(dst_entry)
 				strong_match = None
 				weak_match = None
 				reject_dst = False
-				reject_src = set()
+				reject_src = []
 				for match in matches:
-					if type_entry != type(match) and not self.force:
+					if type_entry != type(match) and not self.sync.force:
 						reject_dst = True
 						break
 					elif dst_entry.name == match.name:
 						strong_match = match
 						if weak_match:
-							reject_src.add(weak_match)
+							reject_src.append(weak_match)
 					elif dst_entry.norm[-1] == match.norm[-1]:
 						if strong_match:
-							reject_src.add(match)
+							reject_src.append(match)
 						if weak_match is None:
 							weak_match = match
 						elif weak_match:
-							reject_src.add(match)
-							reject_src.add(weak_match)
+							reject_src.append(match)
+							reject_src.append(weak_match)
 							weak_match = False
 						else:
-							reject_src.add(match)
+							reject_src.append(match)
 
 				if weak_match is False and strong_match is None:
 					reject_dst = True
@@ -1291,17 +1403,15 @@ class Sync:
 					reject_src = matches
 				for s in reject_src:
 					if type(s) == _Dir:
-						reject_src_dir.add(s._index) # stops recursion into this dir
-						self.logger.warning(f"Match conflict: {src_root_name}{s}{self.out_sep}")
+						self.sync.logger.warning(f"Ignoring ambiguous entry: {src_root_name}{s}{self.sync.out_sep}")
 					else:
-						self.logger.warning(f"Match conflict: {src_root_name}{s}")
+						self.sync.logger.warning(f"Ignoring ambiguous entry: {src_root_name}{s}")
 					ignored_src_entries.add(id(s)) # stops this from being a rename candidate
 				if reject_dst:
 					if type(dst_entry) == _Dir:
-						reject_dst_dir.add(dst_entry._index)
-						self.logger.warning(f"Match conflict: {dst_root_name}{dst_entry}{self.out_sep}")
+						self.sync.logger.warning(f"Ignoring ambiguous entry: {dst_root_name}{dst_entry}{self.sync.out_sep}")
 					else:
-						self.logger.warning(f"Match conflict: {dst_root_name}{dst_entry}")
+						self.sync.logger.warning(f"Ignoring ambiguous entry: {dst_root_name}{dst_entry}")
 					ignored_dst_entries.add(id(dst_entry))
 
 				final_match = strong_match or weak_match
@@ -1323,66 +1433,60 @@ class Sync:
 					else:
 						dst_only_files.add(dst_entry)
 
-			for dst_entry, matches in new_dst.items():
+			for src_entry, matches in in_src_only.items():
 				if len(matches) > 1:
 					for match in matches:
 						if type(match) == _Dir:
-							reject_src_dir.add(match._index)
-							self.logger.warning(f"Match conflict: {src_root_name}{match}{self.out_sep}")
+							self.sync.logger.warning(f"Ignoring ambiguous entry: {src_root_name}{match}{self.sync.out_sep}")
 						else:
-							self.logger.warning(f"Match conflict: {src_root_name}{match}")
+							self.sync.logger.warning(f"Ignoring ambiguous entry: {src_root_name}{match}")
 						ignored_src_entries.add(id(match))
 				else:
 					match = matches[0]
-					if type(dst_entry) == _Dir:
-						src_only_dirs.add(dst_entry)
+					if type(src_entry) == _Dir:
+						src_only_dirs.add(src_entry)
 					else:
-						src_only_files.add(dst_entry)
+						src_only_files.add(src_entry)
 
-		else:
-			# dst dir needs to be deleted
-			for d in dst_dirs:
-				assert d is not None
-				dst_only_dirs.add(d)
-			for f in dst_files:
-				dst_only_files.add(f)
+			# TODO
+			'''
+			self.sync.logger.debug(f"{len(src_only)=}")
+			self.sync.logger.debug(f"{len(dst_only)=}")
+			#self.sync.logger.debug(f"{len(both)=}")
+			self.sync.logger.debug(f"{len(src_dirs)=}")
+			self.sync.logger.debug(f"{len(dst_dirs)=}")
+			self.sync.logger.debug(f"{len(src_empty_dirs)=}")
+			self.sync.logger.debug(f"{len(dst_empty_dirs)=}")
 
-		# TODO
-		'''
-		self.logger.debug(f"{len(src_only)=}")
-		self.logger.debug(f"{len(dst_only)=}")
-		#self.logger.debug(f"{len(both)=}")
-		self.logger.debug(f"{len(src_dirs)=}")
-		self.logger.debug(f"{len(dst_dirs)=}")
-		self.logger.debug(f"{len(src_empty_dirs)=}")
-		self.logger.debug(f"{len(dst_empty_dirs)=}")
+			self.sync.logger.debug(f"{src_only[:10]=}")
+			self.sync.logger.debug(f"{dst_only[:10]=}")
+			self.sync.logger.debug(f"{list(islice(both(), 10))=}")
+			self.sync.logger.debug(f"{list(islice(src_dirs, 10))=}")
+			self.sync.logger.debug(f"{list(islice(dst_dirs, 10))=}")
+			self.sync.logger.debug(f"{list(islice(src_empty_dirs, 10))=}")
+			self.sync.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
+			'''
 
-		self.logger.debug(f"{src_only[:10]=}")
-		self.logger.debug(f"{dst_only[:10]=}")
-		self.logger.debug(f"{list(islice(both(), 10))=}")
-		self.logger.debug(f"{list(islice(src_dirs, 10))=}")
-		self.logger.debug(f"{list(islice(dst_dirs, 10))=}")
-		self.logger.debug(f"{list(islice(src_empty_dirs, 10))=}")
-		self.logger.debug(f"{list(islice(dst_empty_dirs, 10))=}")
-		'''
-
-		return (
-			parent_dir,
-			src_file_metadata,
-			dst_file_metadata,
-			src_only_dirs,
-			dst_only_dirs,
-			src_only_files,
-			dst_only_files,
-			dir_matches,
-			file_matches,
-			ignored_src_entries,
-			ignored_dst_entries,
-		)
+			return Diff(
+				src_parent = src_parent,
+				dst_parent = dst_parent,
+				src_file_metadata = src_file_metadata,
+				dst_file_metadata = dst_file_metadata,
+				src_only_dirs = src_only_dirs,
+				dst_only_dirs = dst_only_dirs,
+				src_only_files = src_only_files,
+				dst_only_files = dst_only_files,
+				dir_matches = dir_matches,
+				file_matches = file_matches,
+				ignored_src_entries = ignored_src_entries,
+				ignored_dst_entries = ignored_dst_entries,
+			)
 
 	def _get_rename_map(self, src_file_metadata, dst_file_metadata, ignored_src_entries, ignored_dst_entries) -> dict[_File, _File]:
 		rename_map: dict[_File, _File] = {}
-		rename_cycles: list[list[list[_File]]] = []
+
+		if src_file_metadata is None or dst_file_metadata is None:
+			return rename_map
 
 		src_meta_to_relpath = _reverse_dict({k:v for k,v in src_file_metadata.items() if id(k) not in ignored_src_entries})
 		dst_meta_to_relpath = _reverse_dict({k:v for k,v in dst_file_metadata.items() if id(k) not in ignored_dst_entries})
@@ -1417,13 +1521,6 @@ class Sync:
 		src_root_name = self.src.name + self.out_sep if self.trash else ""
 		dst_root_name = self.dst.name + self.out_sep if self.trash else ""
 		trash_root_name = self.trash.name + self.out_sep if self.trash else ""
-
-		src_iter = self._scandir(self.src)
-		if self.dst.exists():
-			dst_iter = self._scandir(self.dst)
-		else:
-			dst_iter = iter([])
-			dst_file_metadata: dict[_File, _Metadata] = {}
 
 		def _delete_ops(dst_relpath:_Relpath, dst_file_metadata) -> Iterator[Operation]:
 			if isinstance(dst_relpath, _File):
@@ -1579,29 +1676,19 @@ class Sync:
 			all_ignored_src_entries = set()
 			all_ignored_dst_entries = set()
 
-			for comp, src_entries, dst_entries in _merge_iters(src_iter, dst_iter, key=lambda x: x[0]):
-				(
-					parent_dir,
-					src_file_metadata,
-					dst_file_metadata,
-					src_only_dirs,
-					dst_only_dirs,
-					src_only_files,
-					dst_only_files,
-					dir_matches,
-					file_matches,
-					ignored_src_entries,
-					ignored_dst_entries,
-				) = self._dir_diff(comp, src_entries, dst_entries)
+			for diff in Sync._DualWalk(self, bottom_up_lone_dst=False):
 
-				all_src_file_metadata.update(src_file_metadata)
-				all_dst_file_metadata.update(dst_file_metadata)
-				all_src_only_dirs.update(src_only_dirs)
-				all_dst_only_dirs.update(dst_only_dirs)
-				all_src_only_files.update(src_only_files)
-				all_dst_only_files.update(dst_only_files)
-				all_dir_matches.update(dir_matches)
-				all_file_matches.update(file_matches)
+				all_src_file_metadata.update(diff.src_file_metadata)
+				all_dst_file_metadata.update(diff.dst_file_metadata)
+				all_src_only_dirs.update(diff.src_only_dirs)
+				all_dst_only_dirs.update(diff.dst_only_dirs)
+				all_src_only_files.update(diff.src_only_files)
+				all_dst_only_files.update(diff.dst_only_files)
+				all_dir_matches.update(diff.dir_matches)
+				all_file_matches.update(diff.file_matches)
+
+				all_ignored_src_entries.update(diff.ignored_src_entries) # TODO remove ignored entries from metadata dict
+				all_ignored_dst_entries.update(diff.ignored_dst_entries)
 
 			rename_map = self._get_rename_map(all_src_file_metadata, all_dst_file_metadata, all_ignored_src_entries, all_ignored_dst_entries)
 
@@ -1655,9 +1742,9 @@ class Sync:
 			updates.sort()
 			creates.sort()
 
+			# do deletes first unless a rename is needed to free up a directory
 			delete_keys = list(op.dst for op in deletes)
 			rename_keys = sorted((entry for entry in rename_map), key=cmp_to_key(deepest_first))
-
 			delete_index = 0
 			rename_index = 0
 			while delete_index < len(delete_keys) or rename_index < len(rename_keys):
@@ -1709,97 +1796,45 @@ class Sync:
 
 		else:
 
-			deleting_dirs_under = None
+			for diff in Sync._DualWalk(self):
 
-			# yield after exiting this directory
-			# delete ops always need to be yielded after this dir
-			# other ops only need to be yielded after this dir if there are delete ops
-			delete_after: list[Operation] = []
-			update_after: list[Operation] = []
-			create_after: list[Operation] = []
-			rename_after: list[Operation] = []
+				deletes: list[Operation] = []
+				updates: list[Operation] = []
+				creates: list[Operation] = []
+				renames: list[Operation] = []
 
-			for comp, src_entries, dst_entries in _merge_iters(src_iter, dst_iter, key=lambda x: x[0]):
-				(
-					parent_dir,
-					src_file_metadata,
-					dst_file_metadata,
-					src_only_dirs,
-					dst_only_dirs,
-					src_only_files,
-					dst_only_files,
-					dir_matches,
-					file_matches,
-					ignored_src_entries,
-					ignored_dst_entries,
-				) = self._dir_diff(comp, src_entries, dst_entries)
-
-				rename_map = self._get_rename_map(src_file_metadata, dst_file_metadata, ignored_src_entries, ignored_dst_entries)
-
-				delete_now: list[Operation] = []
-				update_now: list[Operation] = []
-				create_now: list[Operation] = []
-				rename_now: list[Operation] = []
-
-				if deleting_dirs_under and not parent_dir.is_relative_to(deleting_dirs_under):
-					yield from sorted(delete_after) # reversed(delete_after) should also work
-					yield from sorted(update_after)
-					yield from sorted(create_after)
-					yield from rename_after
-					delete_after = []
-					update_after = []
-					create_after = []
-					rename_after = []
-					deleting_dirs_under = None
-
-				if dst_only_dirs and deleting_dirs_under is None:
-				#if deleting_dirs_under is None and (any(f in dst_only_dirs for f in src_only_files) or any(d in dst_only_dirs for d in src_only_dirs)):
-					deleting_dirs_under = parent_dir
-
-				if deleting_dirs_under:
-					deletes = delete_after
-					updates = update_after
-					creates = create_after
-					renames = rename_after
-				else:
-					deletes = delete_now
-					updates = update_now
-					creates = create_now
-					renames = rename_now
+				rename_map = self._get_rename_map(diff.src_file_metadata, diff.dst_file_metadata, diff.ignored_src_entries, diff.ignored_dst_entries)
 
 				# renames
-				renames.extend(_rename_ops(rename_map, src_only_files, file_matches, dst_only_files, dst_only_dirs))
+				renames.extend(_rename_ops(rename_map, diff.src_only_files, diff.file_matches, diff.dst_only_files, diff.dst_only_dirs))
 
 				# deletes
 				if self.delete_files or self.trash:
-					for d in dst_only_dirs:
-						deletes.extend(_delete_ops(d, None))
-					for f in dst_only_files:
-						deletes.extend(_delete_ops(f, dst_file_metadata))
+					#for d in diff.dst_only_dirs:
+					#	deletes.extend(_delete_ops(d, None))
+					if diff.src_parent is None:
+						deletes.extend(_delete_ops(diff.dst_parent, None))
+					for f in diff.dst_only_files:
+						deletes.extend(_delete_ops(f, diff.dst_file_metadata))
 
 				# updates
-				for s, d in file_matches.items():
-					updates.extend(_update_ops(s, d, src_file_metadata, dst_file_metadata))
+				for s, d in diff.file_matches.items():
+					updates.extend(_update_ops(s, d, diff.src_file_metadata, diff.dst_file_metadata))
 
 				# creates
 				if not self.no_create:
-					for s in src_only_dirs:
+					for s in diff.src_only_dirs:
 						creates.extend(_create_ops(s, None))
-					for s in src_only_files:
-						creates.extend(_create_ops(s, src_file_metadata))
+					for s in diff.src_only_files:
+						creates.extend(_create_ops(s, diff.src_file_metadata))
 
 				# TODO combine delete/trash ops into trash/delete dir ops
 				# dir_size would be needed for this
 
-				yield from sorted(delete_now)
-				yield from sorted(update_now)
-				yield from sorted(create_now)
-				yield from rename_now
-
-			yield from sorted(delete_after) # reversed(delete_after) should also work
-			yield from sorted(update_after)
-			yield from sorted(create_after)
-			yield from rename_after
+				yield from sorted(deletes)
+				yield from sorted(updates)
+				yield from sorted(creates)
+				yield from renames
 
 	def run(self) -> Results:
 		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''

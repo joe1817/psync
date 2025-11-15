@@ -541,7 +541,10 @@ class RemotePath:
 
 class _RemotePathScanner:
 	def __init__(self, path:RemotePath):
-		self.entries = path.iterdir()
+		try:
+			self.entries = path.iterdir()
+		except paramiko.sftp.SFTPError as e:
+			raise FileNotFoundError() from e # this is to match os.scandir
 
 	def __iter__(self):
 		return self.entries

@@ -163,7 +163,7 @@ class RemotePath:
 				raise OSError(f"Broken symlink: {src}")
 
 		if st.st_atime is not None and st.st_mtime is not None:
-			if follow_symlinks:
+			if follow_symlinks or not src.is_symlink():
 				os.utime(str(dst), (st.st_atime, st.st_mtime))
 			else:
 				try:
@@ -474,6 +474,13 @@ class RemotePath:
 
 		RemotePath.sftp_connections[self.conn_details].rmdir(str(self))
 
+	def touch(self, mode = 0o666, exist_ok = True):
+		conn = RemotePath.sftp_connections[self.conn_details]
+		file = conn.open(str(self), mode="a")
+		if mode != 0o666:
+			conn.chmod(mode)
+		file.close()
+
 	def unlink(self, missing_ok:bool = True) -> None:
 		'''Delete the remote file.'''
 
@@ -538,6 +545,9 @@ class RemotePath:
 
 	def __repr__(self):
 		return f"{self.conn_details}/{str(self)}"
+
+	def __hash__(self):
+		return hash(self.__repr__())
 
 class _RemotePathScanner:
 	def __init__(self, path:RemotePath):

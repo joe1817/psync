@@ -43,7 +43,7 @@ class _Relpath:
 
 		if out_sys == "nt":
 			if (in_sep == "/" and "\\" in relpath) or ntpath.isreserved(relpath):
-				raise IncompatiblePathError("Incompatible path for this system", str(path))
+				raise IncompatiblePathError("Incompatible path for this system", str(relpath))
 			parts = relpath.split(in_sep)
 			self.norm = tuple(p.lower() for p in parts)
 			self.name = parts[-1]
@@ -1960,15 +1960,15 @@ def _create_symlink(dst:PathType, *, target:str, st, exist_ok:bool = True) -> No
 
 	# update time metadata
 	if st.st_atime is not None and st.st_mtime is not None:
-			if isinstance(dst, Path):
-				try:
-					os.utime(str(dst), (st.st_atime, st.st_mtime), follow_symlinks=False)
-				except NotImplementedError as e:
-					raise UnsupportedOperationError("Could not update time metadata", str(dst)) from e
-			else:
-				RemotePath._utime(dst, st=st, follow_symlinks=False)
+		if isinstance(dst, Path):
+			try:
+				os.utime(str(dst), (st.st_atime, st.st_mtime), follow_symlinks=False)
+			except NotImplementedError as e:
+				raise UnsupportedOperationError("Could not update time metadata", str(dst)) from e
+		else:
+			RemotePath._utime(dst, st=st, follow_symlinks=False)
 	else:
-		raise PermissionError(1, "Could not update time metadata", str(dst))
+		raise MetadataUpdateError("Could not update time metadata", str(dst))
 
 def _move(src:PathType, dst:PathType, *, exist_ok:bool = False) -> None:
 	'''Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''

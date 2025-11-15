@@ -27,26 +27,31 @@ class TestSFTP(unittest.TestCase):
 			raise unittest.SkipTest(f"Configuration file not found at: {CONFIG_PATH}")
 		config.read(CONFIG_PATH)
 		try:
-			cls.enabled = config.get("SERVER_INFO", "enabled").lower() == "true"
+			cls.enabled = config.get("SERVER_INFO", "enabled").lower() in ["true", "t", "1", "yes", "y", "on"]
 			if not cls.enabled:
 				raise unittest.SkipTest(f"Testing over SFTP is disabled.")
 			cls.host = config.get("SERVER_INFO", "host")
 			cls.port = config.getint("SERVER_INFO", "port")
 			cls.username = config.get("SERVER_INFO", "username")
-			self.password = os.getenv("SERVER_PASSWORD", None) or config.get("SERVER_INFO", "password")
+			cls.password = os.getenv("SERVER_PASSWORD", None) or config.get("SERVER_INFO", "password")
 		except (configparser.NoSectionError, configparser.NoOptionError) as e:
 			raise unittest.SkipTest(f"Configuration file is missing required section/option: {e}")
 
 	@classmethod
 	def tearDownClass(cls):
 		# close SFTP connections
-		for ssh in RemotePath.ssh_connections:
-			command = "rm -rf ~/.psync.remote-test"
-			ssh.exec_command(command)
+		for ssh in RemotePath.ssh_connections.values():
+			try:
+				command = "rm -rf ~/.psync.remote-test"
+				ssh.exec_command(command)
+			except:
+				pass
 		RemotePath.close_connections()
+		logger.info("")
 
 	@classmethod
 	def get_remote_root(cls, path):
+		logger.info("")
 		return RemotePath.create(f"{cls.username}:{cls.password}@{cls.host}:{cls.port}/{path}")
 
 	def test_run__basic(self):
@@ -72,21 +77,25 @@ class TestSFTP(unittest.TestCase):
 			local_root = Path(temp_root)
 			local_structure = {
 				"dst": {
-					"A": None,
+					"A": ("", 1),
 					"cC": None,
 					"d": None,
 					"e": {
 						"1.txt": None,
 					}
 				},
-				"expected_windows": {
+			}
+			expected_windows = {
+				"expected": {
 					"A": "A",
 					"b": local_root / "dst/a",
 					"cC": {
 						"1.txt": None,
 					},
-				},
-				"expected_linux": {
+				}
+			}
+			expcted_linux = {
+				"expected": {
 					"a": "a",
 					"A": "A",
 
@@ -99,20 +108,22 @@ class TestSFTP(unittest.TestCase):
 					"Cc": "Cc",
 				},
 			}
+			if os.name == "nt":
+				local_structure.update(expected_windows)
+			else:
+				local_structure.update(expected_linux)
+
 			create_file_structure(local_root, local_structure)
-			dst = root / "dst"
+			dst = local_root / "dst"
+			expected = local_root / "expected"
 
 			results = core.Sync(
 				src,
 				dst,
-				force_update = True,
+				force = True,
+				delete_files = True,
 				print_level = 100,
 			).run()
-
-			if os.name == "nt":
-				expected = local_root / "expected_windows"
-			else:
-				expected = local_root / "expected_linux"
 
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
 			self.assertEqual(hash_directory(dst), hash_directory(expected))

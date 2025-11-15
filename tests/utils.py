@@ -80,8 +80,10 @@ def create_file_structure(root:Path|RemotePath, structure:dict, *, _symlinks:dic
 	'''Recursively creates a directory structure with files.'''
 	if isinstance(root, RemotePath):
 		utime = lambda x, times: RemotePath.sftp_connections[x.conn_details].utime(str(x), times)
+		symlink = lambda x, y: RemotePath.sftp_connections[y.conn_details].symlink(str(x), str(y))
 	else:
 		utime = os.utime
+		symlink = os.symlink
 	root.mkdir(parents=True, exist_ok=True)
 	if _symlinks is not None:
 		symlinks = _symlinks
@@ -89,7 +91,7 @@ def create_file_structure(root:Path|RemotePath, structure:dict, *, _symlinks:dic
 		symlinks = {}
 	for name, content in structure.items():
 		file_path = root / name
-		if isinstance(content, Path):
+		if isinstance(content, (Path, RemotePath)):
 			# create symlink
 			symlinks[file_path] = content
 		elif isinstance(content, dict):
@@ -115,7 +117,7 @@ def create_file_structure(root:Path|RemotePath, structure:dict, *, _symlinks:dic
 	# So, create symlinks after everything else
 	if _symlinks is None:
 		for path, target in symlinks.items():
-			os.symlink(target, path)
+			symlink(target, path)
 
 def readlink(path:str|os.PathLike) -> str|None:
 	link = RemotePath.readlink(path) if isinstance(path, RemotePath) else os.readlink(path)

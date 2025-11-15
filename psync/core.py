@@ -1213,7 +1213,7 @@ class Sync:
 				dir_path = dir / dirname
 				dir_relpath = str(_relative_to(dir_path, root))
 
-				if not filter(root, dir_relpath + self.sync.out_sep):
+				if not filter(dir_relpath + self.sync.out_sep, root=root):
 					continue
 
 				try:
@@ -1275,7 +1275,7 @@ class Sync:
 				file_path = dir / filename
 				file_relpath = str(_relative_to(file_path, root))
 
-				if not filter(root, file_relpath):
+				if not filter(file_relpath, root=root):
 					continue
 
 				try:

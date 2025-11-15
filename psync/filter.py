@@ -21,7 +21,7 @@ class Filter:
 	def __init__(self, default:bool = False):
 		self.default = default
 
-	def filter(self, root:PathLikeType|None, relpath:str, default:bool|None = None) -> bool:
+	def filter(self, relpath:str, *, root:PathLikeType|None = None, default:bool|None = None) -> bool:
 		raise NotImplementedError()
 
 class PathFilter(Filter):
@@ -224,7 +224,7 @@ class PathFilter(Filter):
 			glob_string += "\\"
 		return glob_string
 
-	def __init__(self, filter_string:str = "", *, ignore_hidden:bool = False, ignore_case:bool = False, is_glob:bool = True, glob_is_escaped:bool = False):
+	def __init__(self, filter_string:str = "", *, ignore_hidden:bool = False, ignore_case:bool = (os.name=="nt"), is_glob:bool = True, glob_is_escaped:bool = False):
 		'''
 		Initialize a Filter object.
 
@@ -363,7 +363,7 @@ class PathFilter(Filter):
 					segment.is_implicit = True
 					yield segment
 
-	def filter(self, root:PathLikeType|None, relpath:str, default:bool|None = None) -> bool:
+	def filter(self, relpath:str, *, root:PathLikeType|None = None, default:bool|None = None) -> bool:
 		'''Compare the file path against the filter string.'''
 
 		for segment in self._segments:
@@ -387,8 +387,8 @@ class AllFilter(Filter):
 			raise ValueError("Missing required argument: filters")
 		self.filters = filters
 
-	def filter(self, root:PathLikeType|None, relpath:str, default:bool|None = None) -> bool:
-		if all(f.filter(root, relpath) for f in self.filters):
+	def filter(self, relpath:str, *, root:PathLikeType|None = None, default:bool|None = None) -> bool:
+		if all(f.filter(relpath, root=root) for f in self.filters):
 			return True
 		else:
 			return default if default is not None else self.default

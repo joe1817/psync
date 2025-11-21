@@ -144,10 +144,10 @@ class _Diff:
 	dst_parent          : _Dir|None              = None
 	src_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
 	dst_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
-	src_only_dirs       : set[_Dir]              = field(default_factory=set)
-	dst_only_dirs       : set[_Dir]              = field(default_factory=set)
-	src_only_files      : set[_File]             = field(default_factory=set)
-	dst_only_files      : set[_File]             = field(default_factory=set)
+	src_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set
+	dst_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set
+	src_only_files      : dict[_File, None]      = field(default_factory=dict) # used as sorted set
+	dst_only_files      : dict[_File, None]      = field(default_factory=dict) # used as sorted set
 	dir_matches         : dict[_Dir, _Dir]       = field(default_factory=dict)
 	file_matches        : dict[_File, _File]     = field(default_factory=dict)
 	ignored_src_entries : set[_Relpath]          = field(default_factory=set)
@@ -257,12 +257,12 @@ class _Diff:
 				# remove renamed files from other collections
 				for rename_from, rename_to in chain.items():
 					try:
-						self.src_only_files.remove(rename_to)
+						del self.src_only_files[rename_to]
 						# the following part is only needed for global renames mode
 						if len(rename_to.norm) > 1:
 							new_dir = rename_to.parent
 							while True:
-								self.src_only_dirs.remove(new_dir)
+								del self.src_only_dirs[new_dir]
 								new_dir = new_dir.parent
 					except KeyError:
 						pass
@@ -271,7 +271,7 @@ class _Diff:
 					except KeyError:
 						pass
 					try:
-						self.dst_only_files.remove(rename_from)
+						del self.dst_only_files[rename_from]
 					except KeyError:
 						pass
 
@@ -579,11 +579,11 @@ class _DualWalk:
 		src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, _ = src_list
 		dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, _ = dst_list
 
-		src_only_dirs : set[_Dir] = set() # using a set here to make it easy to remove items when generating rename map
-		dst_only_dirs : set[_Dir] = set()
-		src_only_files: set[_File] = set()
-		dst_only_files: set[_File] = set()
-		dir_matches   : dict[_Dir, _Dir] = {}
+		src_only_dirs : dict[_Dir, None]   = {} # using a dict will keep order of keys, make it easy to remove some later
+		dst_only_dirs : dict[_Dir, None]   = {}
+		src_only_files: dict[_File, None]  = {}
+		dst_only_files: dict[_File, None]  = {}
+		dir_matches   : dict[_Dir, _Dir]   = {}
 		file_matches  : dict[_File, _File] = {}
 		# ignore entries that are ambiguous or in conflict with another entry
 		# ignored entries won't be considered as rename candidates
@@ -696,20 +696,20 @@ class _DualWalk:
 				elif type(final_match) != _Dir and type(dst_entry) == _Dir:
 					assert isinstance(final_match, _File)
 					assert type(dst_entry) == _Dir
-					src_only_files.add(final_match)
-					dst_only_dirs.add(dst_entry)
+					src_only_files[final_match] = None
+					dst_only_dirs[dst_entry] = None
 				else:
 					assert type(final_match) == _Dir
 					assert isinstance(dst_entry, _File)
-					src_only_dirs.add(final_match)
-					dst_only_files.add(dst_entry)
+					src_only_dirs[final_match] = None
+					dst_only_files[dst_entry] = None
 
 			elif not do_reject_dst:
 				if type(dst_entry) == _Dir:
-					dst_only_dirs.add(dst_entry)
+					dst_only_dirs[dst_entry] = None
 				else:
 					assert isinstance(dst_entry, _File)
-					dst_only_files.add(dst_entry)
+					dst_only_files[dst_entry] = None
 
 		for src_normalized, matches in in_src_only.items():
 			src_entry = src_normalized.unwrapped
@@ -724,10 +724,10 @@ class _DualWalk:
 			else:
 				m = matches[0].unwrapped
 				if type(src_entry) == _Dir:
-					src_only_dirs.add(src_entry)
+					src_only_dirs[src_entry] = None
 				else:
 					assert isinstance(src_entry, _File)
-					src_only_files.add(src_entry)
+					src_only_files[src_entry] = None
 
 		diff = _Diff(
 			self.config,
@@ -836,7 +836,7 @@ class _DualWalk:
 							# remove created dirs
 							new_dir = rename_to
 							while True:
-								diff.src_only_dirs.remove(new_dir)
+								del diff.src_only_dirs[new_dir]
 								new_dir = new_dir.parent
 						except KeyError:
 							pass
@@ -846,7 +846,7 @@ class _DualWalk:
 						except KeyError:
 							pass
 						try:
-							diff.dst_only_dirs.remove(rename_from)
+							del diff.dst_only_dirs[rename_from]
 							removed_by_rename.add(rename_from)
 						except KeyError:
 							pass
@@ -861,7 +861,7 @@ class _DualWalk:
 						except KeyError:
 							pass
 						try:
-							diff.dst_only_dirs.remove(rename_from)
+							del diff.dst_only_dirs[rename_from]
 							removed_by_rename.add(rename_from)
 						except KeyError:
 							pass

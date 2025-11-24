@@ -137,7 +137,6 @@ _DirList = namedtuple("_DirList", [
 	"nonstandard_files",
 ])
 
-# TODO remove ignored entries from metadata dict
 @dataclass(frozen=True)
 class _Diff:
 	config              : SyncConfig
@@ -145,7 +144,7 @@ class _Diff:
 	dst_parent          : _Dir|None              = None
 	src_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
 	dst_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
-	src_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set
+	src_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set, Python 3.7+ required
 	dst_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set
 	src_only_files      : dict[_File, None]      = field(default_factory=dict) # used as sorted set
 	dst_only_files      : dict[_File, None]      = field(default_factory=dict) # used as sorted set
@@ -167,6 +166,8 @@ class _Diff:
 		self.ignored_dst_entries.update(other.ignored_dst_entries)
 
 	def get_file_rename_map(self) -> dict[_File, _File]:
+		'''Get a file rename map -- a dict with dst files and what they were renamed to in the src root.'''
+
 		rename_map: dict[_File, _File] = {}
 
 		if self.src_file_metadata is None or self.dst_file_metadata is None:
@@ -189,7 +190,7 @@ class _Diff:
 			assert src_file is not None
 			assert dst_file is not None
 
-			# Ignore if last 1kb do not match
+			# Ignore if last 1kb do not match.
 			if not self.config.metadata_only:
 				try:
 					if not _last_bytes(self.config.src / src_file) == _last_bytes(self.config.dst / dst_file):
@@ -204,78 +205,199 @@ class _Diff:
 		sorted_map = {k:rename_map[k] for k in sorted(rename_map.keys(), key=lambda x: x.norm)} # TODO this won't be needed if the pattern in get_dir_rename_map is copied here
 		return sorted_map
 
-	def get_file_rename_chains(self) -> Iterator[tuple[_File, _File]]:
-		rename_map = self.get_file_rename_map()
-		handled_renames: set[_File] = set()
+	def get_dir_rename_map(self, src_dir_hash: dict[_Dir, int], dst_dir_hash: dict[_Dir, int]) -> dict[_Dir, _Dir]:
+		'''Get a directory rename map -- a dict with dst directories and what they were renamed to in the src root.'''
 
-		for rename_from in rename_map:
-			if rename_from in handled_renames:
+		rename_map: dict[_Dir, _Dir] = {}
+
+		dst_meta_to_relpath = _reverse_dict({k:v for k,v in dst_dir_hash.items() if v is not None})
+		src_meta_to_relpath = _reverse_dict({k:v for k,v in src_dir_hash.items() if v is not None})
+
+		# Keys must be in bottom-up order, meaning child dirs comes before parent dirs.
+		# Don't edit other collections here, don't know which renames are valid.
+		for dst_dir in reversed(dst_dir_hash.keys()):
+			hash = dst_dir_hash[dst_dir]
+			if dst_meta_to_relpath[hash] is None:
 				continue
-			chain: dict[_File, _File] = {}
-			first = rename_from
-			is_cycle = False
+			try:
+				src_dir = src_meta_to_relpath[hash]
+			except KeyError:
+				continue
+			if src_dir is None: # or all(a==b for a,b in zip(dst_dir.norm, src_dir.norm)):
+				continue
+			rename_map[dst_dir] = src_dir
 
-			# get chain/cycle if it exists
+		return rename_map
+
+	def get_rename_chains(self, src_dir_hash: dict[_Dir, int]|None, dst_dir_hash: dict[_Dir, int]|None):
+		'''
+		Get chains of file/directories that need to be renamed in order.
+
+		Most renames will be a chain of length 1, but renames that involve swaps or overlapping file names will have longer chain lengths.
+		'''
+
+		if dst_dir_hash is None:
+			rename_map = self.get_file_rename_map()
+		else:
+			rename_map = self.get_dir_rename_map(src_dir_hash, dst_dir_hash)
+			rename_map.update(self.get_file_rename_map())
+
+		self.config.logger.debug(f"{src_dir_hash=}")
+		self.config.logger.debug(f"{dst_dir_hash=}")
+		self.config.logger.debug(f"{rename_map=}")
+
+		chains: list[dict[_Relpath, _Relpath]] = [] # valid, top-level rename chains
+		removed_by_rename: set[_Relpath] = set() # all entries removed by valid top level renames
+		created_by_rename: set[_Relpath] = set() # all entries created by valid top level renames
+		failed: set[_Relpath] = set()
+		first = None
+
+		# Find valid rename chains. Some may be invalid due to blocking entries.
+		for rename_from, rename_to in rename_map.items():
+			if rename_from in removed_by_rename or rename_from in failed:
+				# Handled in a previous chain.
+				continue
+			if rename_from.parent in removed_by_rename:
+				# Parent dir will be moved, so this dir will go with it.
+				removed_by_rename.add(rename_from)
+				created_by_rename.add(rename_map[rename_from])
+				continue
+			if rename_from.parent in failed:
+				# Parent dir cannot be moved, so neither can this dir.
+				failed.add(rename_from)
+				continue
+
+			is_dir = type(rename_from) == _Dir
+			chain: dict[_Relpath, _Relpath] = {}
+			potential_remove = set()
+			potential_create = set()
+
+			# Get chain/cycle if it exists.
 			while True:
-				handled_renames.add(rename_from)
-				if rename_from not in rename_map:
-					chain = {}
-					break
-
+				if not first:
+					first = rename_from
 				rename_to = rename_map[rename_from]
 				chain[rename_from] = rename_to
 
+				# Don't edit removed_by_rename or created_by_rename unless the chain is verified.
+				potential_remove.add(rename_from)
+				potential_create.add(rename_to)
+
 				if all(a==b for a,b in zip(rename_from.norm, rename_to.norm)):
-					# 'from' is relative to 'to' (or vice versa), ignore either way
-					# otherwise, a temp file may be needed to do this rename and that's a headache
+					# They are equal or in a direct lineage.
+					# If allowed, a temp file may be needed and that's a headache.
+					self.config.logger.debug(f"ignorng chain: {chain}")
+					failed.update(chain.keys())
 					chain = {}
 					break
-				if any(rename_to.is_relative_to(d) for d in self.dst_only_files):
-					# a file is blocking this rename
+				if not is_dir and any(rename_to.is_relative_to(d) for d in self.dst_only_files):
+					# A file is blocking this rename.
+					# TODO The rename could go through if the blocking file is to be deleted.
+					self.config.logger.debug(f"ignorng chain: {chain}")
+					failed.update(chain.keys())
+					chain = {}
+					break
+				if is_dir and any(rename_to.is_relative_to(d) for d in self.dst_only_dirs):
+					# A dir is blocking this rename.
+					# TODO The rename could go through if the blocking dir is to be deleted.
+					self.config.logger.debug(f"ignorng chain: {chain}")
+					failed.update(chain.keys())
+					chain = {}
+					break
+				if rename_to not in rename_map and (rename_to in self.dir_matches or rename_to in self.file_matches):
+					# A matching file is blocking this rename.
+					# The matched entry could be replaced by rename_to, but only if it has an older mtime than rename_to, or --force-update is on.
+					# However, this would be difficult to do for directories.
+					# So for now, just junk the whole chain, and handle it with create/update/delete.
+					self.config.logger.debug(f"ignorng chain: {chain}")
+					failed.update(chain.keys())
 					chain = {}
 					break
 
-				if rename_to in self.src_only_files:
+				# Find the highest level dir that contains rename_to.
+				top_dest_dir = rename_to
+				while True:
+					parent_dir = top_dest_dir.parent
+					if parent_dir in rename_map: # and parent_dir not in removed_by_rename:
+						top_dest_dir = parent_dir
+					else:
+						break
+
+				if is_dir and rename_to in self.src_only_dirs:
+					# Final link in the chain creates a new file.
 					break
-				elif rename_to == first: # or (self.config.global_renames and rename_to in self.dst_only_dirs):
-					is_cycle = True
+				elif not is_dir and rename_to in self.src_only_files:
+					# Final link in the chain creates a new dir.
+					break
+				elif rename_to.is_relative_to(first):
+					# Circular.
 					break
 
-				rename_from = rename_to
+				rename_from = top_dest_dir
 
 			if chain:
-				# yield the chain
-				if is_cycle:
-					keys = list(reversed(chain.keys()))
-					yield keys[-1], chain[keys[-1]] + ".tempmove"
-					for k in keys[:-1]:
-						yield k, chain[k]
-					yield chain[keys[-1]] + ".tempmove", chain[keys[-1]]
-				else:
-					keys = list(reversed(chain.keys()))
-					for k in keys:
-						yield k, chain[k]
+				chains.append(chain)
+				removed_by_rename.update(potential_remove)
+				created_by_rename.update(potential_create)
+			first = None
 
-				# remove renamed files from other collections
-				for rename_from, rename_to in chain.items():
-					try:
-						del self.src_only_files[rename_to]
-						# the following part is only needed for global renames mode
-						if len(rename_to.norm) > 1:
-							new_dir = rename_to.parent
-							while True:
-								del self.src_only_dirs[new_dir]
-								new_dir = new_dir.parent
-					except KeyError:
-						pass
-					try:
-						del self.file_matches[rename_from]
-					except KeyError:
-						pass
-					try:
-						del self.dst_only_files[rename_from]
-					except KeyError:
-						pass
+		#changed_by_rename = removed_by_rename.intersection(created_by_rename)
+		#removed_by_rename -= changed_by_rename
+		#created_by_rename -= changed_by_rename
+		return chains, removed_by_rename, created_by_rename #, changed_by_rename
+
+	def update_other_sets(self, removed_by_rename: set[_Relpath], created_by_rename: set[_Relpath]):
+		'''Remove renamed files from other collections in this `_Diff`.'''
+
+		for rename_from in removed_by_rename:
+			is_dir = type(rename_from) == _Dir
+			try:
+				if is_dir:
+					del self.dir_matches[rename_from]
+				else:
+					del self.file_matches[rename_from]
+			except KeyError:
+				pass
+			try:
+				if is_dir:
+					del self.dst_only_dirs[rename_from]
+				else:
+					del self.dst_only_files[rename_from]
+			except KeyError:
+				pass
+
+		for rename_to in created_by_rename:
+			is_dir = type(rename_to) == _Dir
+			try:
+				if is_dir:
+					del self.src_only_dirs[rename_to]
+				else:
+					del self.src_only_files[rename_to]
+			except KeyError:
+				pass
+
+	def get_rename_pairs(self, src_dir_hash = None, dst_dir_hash = None):
+		'''Convert rename map to a list of 'from', 'to' pairs, adding temp files where needed.'''
+
+		chains, removed_by_rename, created_by_rename = self.get_rename_chains(src_dir_hash, dst_dir_hash)
+		self.update_other_sets(removed_by_rename, created_by_rename)
+
+		self.config.logger.debug(f"{chains=}")
+		self.config.logger.debug(f"{removed_by_rename=}")
+		self.config.logger.debug(f"{created_by_rename=}")
+
+		for chain in chains:
+			pairs = list(reversed(chain.items()))
+			is_cycle = pairs[0][1].is_relative_to(pairs[-1][0])
+
+			if is_cycle:
+				yield pairs[-1][0], pairs[-1][1] + ".tempmove"
+				for a, b in pairs[:-1]:
+					yield a, b
+				yield pairs[-1][1] + ".tempmove", pairs[-1][1]
+			else:
+				for a,b in pairs:
+					yield a, b
 
 class _DualWalk:
 	def __init__(self, config: SyncConfig, *, bottom_up_lone_dst: bool=True, get_dir_hashes: bool=False):
@@ -417,6 +539,7 @@ class _DualWalk:
 
 	def dir_list(self, dir: P|None, root: P) -> _DirList:
 		'''Returns a tuple of the contents of a directory.'''
+
 		parent_dir       : _Normalized|None = None
 		dirs             : list[_Normalized]  = [] # empty data structs are better for updating/extending than None
 		files            : list[_Normalized] = []
@@ -608,13 +731,13 @@ class _DualWalk:
 		#		dst_only_files.add(f)
 		#else:
 
-		# find matches between src and dst
-		# strong match = file names match exactly
-		# weak match = file names match after normalizing case
-		# a dir/file can have at most one strong match, and it will always be chosen with priority
-		# a dir/file can have multiple weak matches
-		# a weak match will be be chosen if there is only one and there is no strong match
-		# if there is no chosen match, then the file is ignored, along with all weak matches to it
+		# Find matches between src and dst.
+		# A "strong match" means file names match exactly.
+		# A "weak match" means file names match after normalizing case.
+		# An entry can have at most one strong match, and it will always be chosen with priority.
+		# An entry can have multiple weak matches.
+		# A weak match will be be chosen if there is only one and there is no strong match.
+		# If there is no chosen match, then the file is ignored, along with all weak matches to it.
 
 		in_dst: dict[_Normalized, list[_Normalized]] = {}
 		in_src_only: dict[_Normalized, list[_Normalized]] = {}
@@ -749,140 +872,59 @@ class _DualWalk:
 		# self.config.logger.debug(diff)
 		return diff
 
-	def get_dir_rename_map(self) -> dict[_Dir, _Dir]:
-		if not self.get_dir_hashes:
-			raise RuntimeError("dir hashses not calculated")
+	'''
+	def combine_renames(self, rename_map):
+		#Combine RenameFileOps into RenameDirOps.
 
-		rename_map: dict[_Dir, _Dir] = {}
+		self.dst_root_relpath = self.dst.name + self.dst_sep if self.trash else ""
 
-		dst_meta_to_relpath = _reverse_dict({k:v for k,v in self.dst_dir_hash.items() if v is not None})
-		src_meta_to_relpath = _reverse_dict({k:v for k,v in self.src_dir_hash.items() if v is not None})
+		do_combine = True
+		renames_to_check = {}
 
-		# Python 3.7+ required so keys are in insertion order
-		# keys should be in bottom-up order
-		# don't edit other collections here, don't know which renames are valid
-		for dst_dir in reversed(self.dst_dir_hash.keys()):
-			hash = self.dst_dir_hash[dst_dir]
-			if dst_meta_to_relpath[hash] is None:
-				continue
-			if any(dst_dir.is_relative_to(d) for d in rename_map):
-				continue
-			try:
-				src_dir = src_meta_to_relpath[hash]
-			except KeyError:
-				continue
-			if src_dir is None or all(a==b for a,b in zip(dst_dir.norm, src_dir.norm)):
-				# they are equal or in a direct lineage
-				continue
-			rename_map[dst_dir] = src_dir
+		while do_combine:
+			do_combine = False
 
-		sorted_map = {k:rename_map[k] for k in sorted(rename_map.keys())} # TODO I think it is already sorted
-		return sorted_map
+			targets = {} # parent dir -> target parent dir
+			renames_in_dir = {} # parent dir -> list of rename_from
 
-	def get_dir_rename_chains(self, diff: _Diff) -> Iterator[tuple[_Dir, _Dir]]:
-		# get dir renames
-		dir_rename_map = self.get_dir_rename_map()
-		handled_renames: set[_Dir] = set()
-		removed_by_rename = set()
+			for rename_from, rename_to in rename_map.items():
 
-		for rename_from in reversed(self.dst_dir_hash.keys()):
-			if rename_from in dir_rename_map:
-				if rename_from in handled_renames:
+				if len(rename_from.norm) == 1:
 					continue
-				chain: dict[_Dir, _Dir] = {}
-				first = rename_from
-				is_cycle = False
 
-				# get chain/cycle if it exists
-				while True:
-					handled_renames.add(rename_from)
-					if rename_from not in dir_rename_map:
-						chain = {}
-						break
+				if rename_from.name != rename_to.name:
+					continue
 
-					rename_to = dir_rename_map[rename_from]
-					chain[rename_from] = rename_to
+				parent = rename_from.parent
+				target = rename_to.parent
 
-					# renamed dirs were rejected if the src/dst were nested
-					# assert not all(a==b for a,b in zip(rename_from.norm, rename_to.norm))
+				if parent not in targets and target not in dst_dir_sizes:
+					targets[parent] = target
+					renames_in_dir[parent] = [rename_from]
+				elif targets[parent] is None:
+					pass
+				elif target != targets[parent]:
+					targets[parent] = None
+					renames_in_dir[parent] = []
+				else:
+					renames_in_dir[parent].append(rename_from)
 
-					if any(rename_to.is_relative_to(d) for d in diff.dst_only_files):
-						# a file is blocking this rename
-						chain = {}
-						break
+			for parent, rename_froms in renames_in_dir.items():
+				if dst_dir_sizes[parent] == len(rename_froms):
+					do_combine = True
+					rename_map[parent] = targets[parent]
+					for old_rename_from in rename_froms:
+						del rename_map[old_rename_from]
+					try:
+						diff.dst_only_dirs.remove(parent)
+					except KeyError:
+						parent2 = diff.dir_matches[parent]
+						del diff.dir_matches[parent]
+						diff.src_only_dirs.add(parent2)
+					diff.src_only_dirs.remove(targets[parent])
 
-					if rename_to in diff.src_only_dirs:
-						break
-					elif rename_to == first:
-						is_cycle = True
-						break
-
-					rename_from = rename_to
-
-				if chain:
-					# yield the chain
-					if is_cycle:
-						keys = list(reversed(chain.keys()))
-						yield keys[-1], chain[keys[-1]] + ".tempmove"
-						for k in keys[:-1]:
-							yield k, chain[k]
-						yield chain[keys[-1]] + ".tempmove", chain[keys[-1]]
-					else:
-						keys = list(reversed(chain.keys()))
-						for k in keys:
-							yield k, chain[k]
-
-					# remove renamed files from other collections
-					for rename_from, rename_to in chain.items():
-						try:
-							# remove created dirs
-							new_dir = rename_to
-							while True:
-								del diff.src_only_dirs[new_dir]
-								new_dir = new_dir.parent
-						except KeyError:
-							pass
-						try:
-							del diff.dir_matches[rename_from]
-							removed_by_rename.add(rename_from)
-						except KeyError:
-							pass
-						try:
-							del diff.dst_only_dirs[rename_from]
-							removed_by_rename.add(rename_from)
-						except KeyError:
-							pass
-			else:
-				# remove dirs under renamed dirs
-				if len(rename_from.norm) > 1:
-					parent = rename_from.parent
-					if parent in removed_by_rename:
-						try:
-							del diff.dir_matches[rename_from]
-							removed_by_rename.add(rename_from)
-						except KeyError:
-							pass
-						try:
-							del diff.dst_only_dirs[rename_from]
-							removed_by_rename.add(rename_from)
-						except KeyError:
-							pass
-
-	def get_combined_rename_chains(self, diff: _Diff) -> Iterator[tuple[_Relpath, _Relpath]]:
-		dir_rename_keys: set[_Dir] = set()
-		dir_iter  = self.get_dir_rename_chains(diff)
-		file_iter = diff.get_file_rename_chains()
-		for comp, d, f in _merge_iters(dir_iter, file_iter, key = lambda x: x[0].norm):
-			if comp == -1:
-				# yield dir renames
-				dir_rename_keys.add(d[0])
-				yield d[0], d[1]
-			elif comp == 1:
-				# yield file renames not covered by dir renames
-				if not any(f[0].is_relative_to(k) for k in dir_rename_keys):
-					yield f[0], f[1]
-			else:
-				raise RuntimeError("dir & file sets should be partitions")
+		return {k:rename_map[k] for k in sorted(rename_map.keys())}
+	'''
 
 def _last_bytes(file:AbstractPath, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''
@@ -894,57 +936,3 @@ def _last_bytes(file:AbstractPath, n:int = 1024) -> bytes:
 	with file.open("rb") as f:
 		f.seek(-bytes_to_read, os.SEEK_END)
 		return f.read()
-
-"""
-def combine_renames(self, rename_map, diff, dst_dir_sizes):
-	'''Combine RenameFileOps into RenameDirOps.'''
-
-	self.dst_root_relpath = self.dst.name + self.dst_sep if self.trash else ""
-
-	do_combine = True
-	renames_to_check = {}
-
-	while do_combine:
-		do_combine = False
-
-		targets = {} # parent dir -> target parent dir
-		renames_in_dir = {} # parent dir -> list of rename_from
-
-		for rename_from, rename_to in rename_map.items():
-
-			if len(rename_from.norm) == 1:
-				continue
-
-			if rename_from.name != rename_to.name:
-				continue
-
-			parent = rename_from.parent
-			target = rename_to.parent
-
-			if parent not in targets and target not in dst_dir_sizes:
-				targets[parent] = target
-				renames_in_dir[parent] = [rename_from]
-			elif targets[parent] is None:
-				pass
-			elif target != targets[parent]:
-				targets[parent] = None
-				renames_in_dir[parent] = []
-			else:
-				renames_in_dir[parent].append(rename_from)
-
-		for parent, rename_froms in renames_in_dir.items():
-			if dst_dir_sizes[parent] == len(rename_froms):
-				do_combine = True
-				rename_map[parent] = targets[parent]
-				for old_rename_from in rename_froms:
-					del rename_map[old_rename_from]
-				try:
-					diff.dst_only_dirs.remove(parent)
-				except KeyError:
-					parent2 = diff.dir_matches[parent]
-					del diff.dir_matches[parent]
-					diff.src_only_dirs.add(parent2)
-				diff.src_only_dirs.remove(targets[parent])
-
-	return {k:rename_map[k] for k in sorted(rename_map.keys())}
-"""

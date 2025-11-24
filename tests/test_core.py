@@ -689,6 +689,7 @@ class TestSync(unittest.TestCase):
 			).run()
 
 			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			self.assertEqual(results[operations.RenameFileOperation].success, 1)
 			self.assertEqual(results[operations.DeleteFileOperation].success, 2) # c, a\1
@@ -863,3 +864,49 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(hash_directory(src), hash_directory(dst))
 			#self.assertEqual(sum(results[operations.CreateFileOperation]), 0)
 			#self.assertEqual(sum(results[operations.DeleteFileOperation]), 1) # r
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_run__global_renames2(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"a": {
+						"1.txt": 1,
+						"b": {
+							"2.txt": 2,
+						},
+					},
+					"c": {
+						"3.txt": 3,
+					},
+				},
+				"dst": {
+					"c": {
+						"1.txt": 1,
+						"b": {
+							"2.txt": 2,
+						},
+					},
+					"a": {
+						"3.txt": 3,
+					},
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				global_renames = True,
+				metadata_only = True,
+				rename_threshold = 0,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))
+			self.assertEqual(results[operations.CreateFileOperation].success, 0)

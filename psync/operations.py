@@ -39,7 +39,7 @@ def _get_operations(config) -> Iterator["Operation"]:
 			diff.update(dif)
 
 		# renames
-		for rename_from, rename_to in dw.get_combined_rename_chains(diff):
+		for rename_from, rename_to in diff.get_rename_pairs(dw.src_dir_hash, dw.dst_dir_hash):
 			renames.extend(factory.get_rename_ops(rename_from, rename_to))
 
 		# deletes
@@ -82,7 +82,7 @@ def _get_operations(config) -> Iterator["Operation"]:
 			creates = []
 
 			# renames
-			for rename_from, rename_to in diff.get_file_rename_chains():
+			for rename_from, rename_to in diff.get_rename_pairs():
 				renames.extend(factory.get_rename_ops(rename_from, rename_to))
 
 			# deletes

@@ -100,16 +100,15 @@ def create_file_structure(root:Path|RemotePath, structure:dict, *, _symlinks:dic
 		elif isinstance(content, dict):
 			# create dir
 			create_file_structure(file_path, content, _symlinks=symlinks)
+		elif type(content) in (float, int):
+			file_path.touch()
+			mtime = float(content)
+			utime(file_path, (mtime, mtime))
 		elif isinstance(content, (tuple, list)):
 			# Create file with modtime and content
 			file_path.write_text(content[0] or "")
 			mtime = float(content[1])
 			utime(file_path, (mtime, mtime))
-			assert file_path.stat().st_mtime == mtime
-			# Force the OS to write all metadata changes (including mtime) to disk
-			#with open(file_path, "r+") as f:
-			#	f.flush()
-			#	os.fsync(f.fileno())
 		elif content is None:
 			# Create an empty file
 			file_path.touch()

@@ -12,13 +12,14 @@ from dataclasses import fields
 from typing import Counter as CounterType
 from collections import Counter, namedtuple
 
-from .config import SyncConfig
-from .operations import Operation, _get_operations, _replace
+from .config import _SyncConfig
+from .operations import _get_operations, _replace
+from .operations import * # Operations
 from .filter import Filter, PathFilter
-from .helpers import UniqueIDGenerator, _human_readable_size
+from .helpers import _UniqueIDGenerator, _human_readable_size
 from .sftp import RemotePath
 from .watch import _LocalWatcher
-from .types import AbstractPath
+from .types import _AbstractPath
 from .errors import StateError, UnsupportedOperationError
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
@@ -34,21 +35,21 @@ class Results:
 		INTERRUPTED_BY_USER  = 2
 		INTERRUPTED_BY_ERROR = 3
 
-	def __init__(self, config: SyncConfig):
-		self.config         : SyncConfig = config
+	def __init__(self, config: _SyncConfig):
+		self.config         : _SyncConfig = config
 		self.status         : Results.Status = Results.Status.UNKNOWN
 		self.error          : BaseException|None = None # any error that prevented or halted sync operation
 		self.sync_errors    : list[tuple[Operation, Exception]] = []
-		self.success_counts : CounterType[str] = Counter()
-		self.failure_counts : CounterType[str] = Counter()
+		self.success_counts : CounterType[type[Operation]] = Counter()
+		self.failure_counts : CounterType[type[Operation]] = Counter()
 		self.byte_diff      : int = 0
 
 	def tally_success(self, op:Operation):
-		self.success_counts[op.name] += 1
+		self.success_counts[type(op)] += 1
 		self.byte_diff += op.byte_diff
 
 	def tally_failure(self, op:Operation, e:Exception):
-		self.failure_counts[op.name] += 1
+		self.failure_counts[type(op)] += 1
 		self.sync_errors.append((op, e))
 
 	@property
@@ -64,10 +65,7 @@ class Results:
 		return self.success_count + self.failure_count
 
 	def __getitem__(self, key):
-		if isinstance(key, type) and issubclass(key, Operation):
-			return Results.Counts(success=self.success_counts[key.name], failure=self.failure_counts[key.name])
-		else:
-			return self.counts[key]
+		return Results.Counts(success=self.success_counts[key], failure=self.failure_counts[key])
 
 	def summary(self):
 		status = self.status.name.replace("_", " ").title()
@@ -78,9 +76,17 @@ class Results:
 		else:
 			lines.append(f"Status: {status}")
 			# keys = self.success_counts.keys()|self.failure_counts.keys()
-			keys = ["Create", "Update", "Rename", "Delete", "Trash"]
-			for key in keys:
-				lines.append(f"{key} Success: {self.success_counts[key]}" + (f" | Failed: {self.failure_counts[key]}" if self.failure_counts[key] else ""))
+			keys = {
+				"Create": [CreateFileOperation, CreateSymlinkOperation, CreateDirOperation],
+				"Update": [UpdateFileOperation],
+				"Rename": [RenameFileOperation, RenameDirOperation],
+				"Delete": [DeleteFileOperation, DeleteDirOperation],
+				" Trash": [TrashFileOperation, TrashDirOperation],
+			}
+			for key, types in keys.items():
+				total_success = sum(self[t].success for t in types)
+				total_failure = sum(self[t].failure for t in types)
+				lines.append(f"{key} Success: {total_success}" + (f" | Failed: {total_failure}" if total_failure else ""))
 			lines.append(f"Net Change: {_human_readable_size(self.byte_diff)}")
 		if self.config.log_file:
 			lines.append(f"Log File: {self.config.log_file}")
@@ -110,7 +116,7 @@ class Sync:
 		+ empty-dir-in-src/
 		  -------
 		          Status: Completed
-		  Create Success: 1
+		  Create Success: 2
 		  Update Success: 1
 		  Rename Success: 1
 		  Delete Success: 1
@@ -129,7 +135,7 @@ class Sync:
 		RUNNING    = 2
 		TERMINATED = 3
 
-	def __init__(self, src:AbstractPath|str, dst:AbstractPath|str, **kwargs):
+	def __init__(self, src:_AbstractPath|str, dst:_AbstractPath|str, **kwargs):
 		'''
 		Collects and validates arguments for a sync operation.
 
@@ -142,14 +148,18 @@ class Sync:
 			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
 			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
 
-			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
 			delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst` but not `src`). Mutually exclusive with `trash`. (Defaults to `False`.)
+			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
+			force_update      (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
+			force_replace     (bool) : Whether to allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
 			no_create         (bool) : Whether to prevent the creation of any files or directories in `dst`. (Defaults to `False`.)
-			force             (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`, and it will allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
+			no_renames        (bool) : Whether to prevent the renaming of any files or directories in `dst`. (Defaults to `False`.)
 			global_renames    (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
 			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
-			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. A value of `None` will mean no files in `dst` will be eligible for renaming. (Defaults to `10000`.)
+			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `10000`.)
 
+			shutdown_src      (bool) : Shutdown the src system when done. (Defaults to `False`.)
+			shutdown_dst      (bool) : Shutdown the dst system when done. (Defaults to `False`.)
 			dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
 
 			log_file (Path|bool|str) : The path of the log file to use. It will be created if it does not exist. A value of `True` or "auto" means a tempfile will be used for the log, and it will be moved to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
@@ -166,23 +176,27 @@ class Sync:
 
 		self._state = Sync._SyncState.INVALID
 
-		self._src : AbstractPath
-		self._dst : AbstractPath
+		self._src : _AbstractPath
+		self._dst : _AbstractPath
 
 		self.src = src
 		self.dst = dst
 
 		self._filter             : Filter = PathFilter("+ **/*")
-		self._trash              : AbstractPath|bool|None = None
-		self._delete_files       : bool = False
-		self._no_create          : bool = False
-		self._force              : bool = False
-		self._global_renames     : bool = False
-		self._metadata_only      : bool = False
-		self._rename_threshold   : int|None = 10000
 		self._translate_symlinks : bool = True
 		self._ignore_symlinks    : bool = False
 		self._follow_symlinks    : bool = False
+
+		self._delete_files       : bool = False
+		self._trash              : _AbstractPath|bool|None = None
+		self._force_update       : bool = False
+		self._force_replace      : bool = False
+		self._no_create          : bool = False
+		self._no_renames         : bool = False
+		self._global_renames     : bool = False
+		self._metadata_only      : bool = False
+		self._rename_threshold   : int  = 10000
+
 		self._shutdown_src       : bool = False
 		self._shutdown_dst       : bool = False
 		self._dry_run            : bool = False
@@ -329,16 +343,16 @@ class Sync:
 	# Collected & validated arguments
 
 	@property
-	def src(self) -> AbstractPath:
+	def src(self) -> _AbstractPath:
 		return self._src
 
 	@src.setter
-	def src(self, val:AbstractPath|str) -> None:
-		if not isinstance(val, AbstractPath|str):
-			raise TypeError(f"Bad type for property 'src' (expected {AbstractPath|str}): {val}")
+	def src(self, val:_AbstractPath|str) -> None:
+		if not isinstance(val, _AbstractPath|str):
+			raise TypeError(f"Bad type for property 'src' (expected {_AbstractPath|str}): {val}")
 
-		src: AbstractPath
-		if isinstance(val, AbstractPath):
+		src: _AbstractPath
+		if isinstance(val, _AbstractPath):
 			src = val
 		else:
 			assert isinstance(val, str)
@@ -349,7 +363,7 @@ class Sync:
 				val = os.path.expandvars(val)
 				src = Path(val)
 
-		assert isinstance(src, AbstractPath)
+		assert isinstance(src, _AbstractPath)
 		if src.exists() and not src.is_dir():
 			raise ValueError(f"'src' is not a directory: {val}")
 		if not src.exists():
@@ -378,16 +392,16 @@ class Sync:
 		self._src = src
 
 	@property
-	def dst(self) -> AbstractPath:
+	def dst(self) -> _AbstractPath:
 		return self._dst
 
 	@dst.setter
-	def dst(self, val:AbstractPath|str) -> None:
-		if not isinstance(val, AbstractPath|str):
-			raise TypeError(f"Bad type for property 'dst' (expected {AbstractPath|str}): {val}")
+	def dst(self, val:_AbstractPath|str) -> None:
+		if not isinstance(val, _AbstractPath|str):
+			raise TypeError(f"Bad type for property 'dst' (expected {_AbstractPath|str}): {val}")
 
-		dst: AbstractPath
-		if isinstance(val, AbstractPath):
+		dst: _AbstractPath
+		if isinstance(val, _AbstractPath):
 			dst = val
 		else:
 			assert isinstance(val, str)
@@ -398,7 +412,7 @@ class Sync:
 				val = os.path.expandvars(val)
 				dst = Path(val)
 
-		assert isinstance(dst, AbstractPath)
+		assert isinstance(dst, _AbstractPath)
 		if dst.exists() and not dst.is_dir():
 			raise ValueError(f"'dst' is not a directory: {val}")
 
@@ -416,7 +430,7 @@ class Sync:
 				if os.stat(self.trash).st_dev != os.stat(dst).st_dev:
 					raise ValueError(f"'trash' is not on the same file system as 'dst': {self.trash}")
 
-		assert isinstance(dst, AbstractPath)
+		assert isinstance(dst, _AbstractPath)
 		dst = dst.resolve()
 
 		if hasattr(self, "_src") and self.src and type(self.src) == type(dst):
@@ -459,13 +473,25 @@ class Sync:
 		self._filter = filter
 
 	@property
-	def trash(self) -> AbstractPath|bool|None:
+	def delete_files(self) -> bool:
+		return self._delete_files
+
+	@delete_files.setter
+	def delete_files(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'delete_files' (expected bool): {val}")
+		if val and self.trash:
+			raise StateError("Mutually exclusive properties: 'trash' and 'delete_files'")
+		self._delete_files = val
+
+	@property
+	def trash(self) -> _AbstractPath|bool|None:
 		return self._trash
 
 	@trash.setter
-	def trash(self, val:AbstractPath|str|bool|None) -> None:
-		if not isinstance(val, AbstractPath|str|bool|None):
-			raise TypeError(f"Bad type for property 'trash' (expected {AbstractPath|str|bool|None}): {val}")
+	def trash(self, val:_AbstractPath|str|bool|None) -> None:
+		if not isinstance(val, _AbstractPath|str|bool|None):
+			raise TypeError(f"Bad type for property 'trash' (expected {_AbstractPath|str|bool|None}): {val}")
 
 		if val is None or val is False:
 			self._trash = None
@@ -478,8 +504,8 @@ class Sync:
 			self._trash = True # will be finalized in setup_trash
 			return
 
-		trash: AbstractPath
-		if isinstance(val, AbstractPath):
+		trash: _AbstractPath
+		if isinstance(val, _AbstractPath):
 			trash = val
 		else:
 			assert isinstance(val, str)
@@ -493,7 +519,7 @@ class Sync:
 				val = os.path.expandvars(val)
 				trash = Path(val)
 
-		assert isinstance(trash, AbstractPath)
+		assert isinstance(trash, _AbstractPath)
 		if trash.exists() and not trash.is_dir():
 			raise ValueError(f"'trash' is not a directory: {val}")
 
@@ -509,16 +535,24 @@ class Sync:
 		self._trash = trash
 
 	@property
-	def delete_files(self) -> bool:
-		return self._delete_files
+	def force_update(self) -> bool:
+		return self._force_update
 
-	@delete_files.setter
-	def delete_files(self, val:bool) -> None:
+	@force_update.setter
+	def force_update(self, val:bool) -> None:
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'delete_files' (expected bool): {val}")
-		if val and self.trash:
-			raise StateError("Mutually exclusive properties: 'trash' and 'delete_files'")
-		self._delete_files = val
+			raise TypeError(f"Bad type for property 'force_update' (expected bool): {val}")
+		self._force_update = val
+
+	@property
+	def force_replace(self) -> bool:
+		return self._force_replace
+
+	@force_replace.setter
+	def force_replace(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'force_replace' (expected bool): {val}")
+		self._force_replace = val
 
 	@property
 	def no_create(self) -> bool:
@@ -531,14 +565,14 @@ class Sync:
 		self._no_create = val
 
 	@property
-	def force(self) -> bool:
-		return self._force
+	def no_renames(self) -> bool:
+		return self._no_renames
 
-	@force.setter
-	def force(self, val:bool) -> None:
+	@no_renames.setter
+	def no_renames(self, val:bool) -> None:
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'force' (expected bool): {val}")
-		self._force = val
+			raise TypeError(f"Bad type for property 'no_renames' (expected bool): {val}")
+		self._no_renames = val
 
 	@property
 	def global_renames(self) -> bool:
@@ -561,15 +595,11 @@ class Sync:
 		self._metadata_only = val
 
 	@property
-	def rename_threshold(self) -> int|None:
+	def rename_threshold(self) -> int:
 		return self._rename_threshold
 
 	@rename_threshold.setter
-	def rename_threshold(self, val:int|None) -> None:
-		if val is None:
-			self._rename_threshold = None
-			return
-
+	def rename_threshold(self, val:int) -> None:
 		if not isinstance(val, int):
 			raise TypeError(f"Bad type for arg 'rename_threshold' (expected int): {val}")
 		self._rename_threshold = val
@@ -680,7 +710,7 @@ class Sync:
 		self._debug = val
 
 	# -------------------------------------------------------------------------
-	# Not passed to SyncConfig
+	# Not passed to _SyncConfig
 
 	@property
 	def file_level(self) -> int:
@@ -752,10 +782,10 @@ class SyncRunner:
 			logger.error(f"Error executing shutdown command: {e}")
 
 	@classmethod
-	def get_config(cls, sync: Sync) -> SyncConfig:
-		names = {f.name for f in fields(SyncConfig)}
+	def get_config(cls, sync: Sync) -> _SyncConfig:
+		names = {f.name for f in fields(_SyncConfig)}
 		options = {name: getattr(sync, name) for name in names}
-		config = SyncConfig(**options)
+		config = _SyncConfig(**options)
 		return config
 
 	@classmethod
@@ -763,7 +793,7 @@ class SyncRunner:
 		if sync._state != Sync._SyncState.READY:
 			raise StateError("Sync object state is not READY.")
 
-		timestamp = UniqueIDGenerator.get_timestamp()
+		timestamp = _UniqueIDGenerator.get_timestamp()
 		sync.setup_trash(timestamp)
 		sync.setup_logging(timestamp)
 		config  = cls.get_config(sync)
@@ -837,22 +867,23 @@ class SyncRunner:
 
 			# shutdown all remote hosts before local
 			# send shutdown signal at most once per host
-			do_shutdown_local = False
-			shutdown_remote: set[str] = set()
-			if config.shutdown_src:
-				if isinstance(config.src, RemotePath):
-					shutdown_remote.add(config.src.hostname)
-				else:
-					do_shutdown_local = True
-			if config.shutdown_dst:
-				if isinstance(config.dst, RemotePath):
-					shutdown_remote.add(config.dst.hostname)
-				else:
-					do_shutdown_local = True
-			for hostname in shutdown_remote:
-				RemotePath.shutdown(hostname)
-			if do_shutdown_local:
-				SyncRunner.shutdown_local()
+			if results.status == Results.Status.COMPLETED:
+				do_shutdown_local = False
+				shutdown_remote: set[str] = set()
+				if config.shutdown_src:
+					if isinstance(config.src, RemotePath):
+						shutdown_remote.add(config.src.hostname)
+					else:
+						do_shutdown_local = True
+				if config.shutdown_dst:
+					if isinstance(config.dst, RemotePath):
+						shutdown_remote.add(config.dst.hostname)
+					else:
+						do_shutdown_local = True
+				for hostname in shutdown_remote:
+					RemotePath.shutdown(hostname)
+				if do_shutdown_local:
+					SyncRunner.shutdown_local()
 
 		sync._state = Sync._SyncState.READY
 		return results

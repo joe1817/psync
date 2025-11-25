@@ -25,6 +25,29 @@ class TestSync(unittest.TestCase):
 
 			sync.filter = "- a b + c d - **"
 
+			sync.symlink_translation = True
+			self.assertEqual(sync.symlink_translation, True)
+			sync.symlink_translation = False
+			self.assertEqual(sync.symlink_translation, False)
+
+			sync.ignore_symlinks = True
+			sync.follow_symlinks = False
+
+			self.assertEqual(sync.ignore_symlinks, True)
+			self.assertEqual(sync.follow_symlinks, False)
+
+			with self.assertRaises(RuntimeError):
+				sync.follow_symlinks = True
+
+			sync.ignore_symlinks = False
+			sync.follow_symlinks = True
+
+			self.assertEqual(sync.ignore_symlinks, False)
+			self.assertEqual(sync.follow_symlinks, True)
+
+			with self.assertRaises(RuntimeError):
+				sync.ignore_symlinks = True
+
 			sync.trash = root
 			sync.delete_files = False
 
@@ -48,15 +71,25 @@ class TestSync(unittest.TestCase):
 
 			self.assertEqual(sync.trash, True)
 
+			sync.force_update = True
+			self.assertEqual(sync.force_update, True)
+			sync.force_update = False
+			self.assertEqual(sync.force_update, False)
+
+			sync.force_replace = True
+			self.assertEqual(sync.force_replace, True)
+			sync.force_replace = False
+			self.assertEqual(sync.force_replace, False)
+
 			sync.no_create = True
 			self.assertEqual(sync.no_create, True)
 			sync.no_create = False
 			self.assertEqual(sync.no_create, False)
 
-			sync.force = True
-			self.assertEqual(sync.force, True)
-			sync.force = False
-			self.assertEqual(sync.force, False)
+			sync.no_renames = True
+			self.assertEqual(sync.no_renames, True)
+			sync.no_renames = False
+			self.assertEqual(sync.no_renames, False)
 
 			sync.global_renames = True
 			self.assertEqual(sync.global_renames, True)
@@ -72,31 +105,11 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(sync.rename_threshold, 100)
 			sync.rename_threshold = 0
 			self.assertEqual(sync.rename_threshold, 0)
-			sync.rename_threshold = None
-			self.assertEqual(sync.rename_threshold, None)
 
-			sync.symlink_translation = True
-			self.assertEqual(sync.symlink_translation, True)
-			sync.symlink_translation = False
-			self.assertEqual(sync.symlink_translation, False)
-
-			sync.ignore_symlinks = True
-			sync.follow_symlinks = False
-
-			self.assertEqual(sync.ignore_symlinks, True)
-			self.assertEqual(sync.follow_symlinks, False)
-
-			with self.assertRaises(RuntimeError):
-				sync.follow_symlinks = True
-
-			sync.ignore_symlinks = False
-			sync.follow_symlinks = True
-
-			self.assertEqual(sync.ignore_symlinks, False)
-			self.assertEqual(sync.follow_symlinks, True)
-
-			with self.assertRaises(RuntimeError):
-				sync.ignore_symlinks = True
+			sync.shutdown_src = True
+			self.assertEqual(sync.shutdown_src, True)
+			sync.shutdown_dst = True
+			self.assertEqual(sync.shutdown_dst, True)
 
 			sync.dry_run = True
 			self.assertEqual(sync.dry_run, True)
@@ -190,7 +203,8 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				trash = "auto",
-				force = True,
+				force_update = True,
+				force_replace = True,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -202,7 +216,8 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				force = True,
+				force_update = True,
+				force_replace = True,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -537,7 +552,8 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				trash = "auto",
-				force = True,
+				force_update = True,
+				force_replace = True,
 				print_level = 100,
 			).run()
 
@@ -684,7 +700,8 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				force = True,
+				force_update = True,
+				force_replace = True,
 				delete_files = True,
 				rename_threshold = 0,
 				print_level = 100,
@@ -856,7 +873,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				force = True, # TODO force_replace in the future
+				force_replace = True,
 				global_renames = True,
 				rename_threshold = 0,
 				print_level = 100,

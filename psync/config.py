@@ -6,28 +6,33 @@ from logging import Logger
 from typing import TypeVar
 
 from .filter import Filter
-from .types import AbstractPath
+from .types import _AbstractPath
 
 @dataclass(frozen=True)
-class SyncConfig:
+class _SyncConfig:
 	# collected in Sync constructor
-	src               : AbstractPath # using the protocol, not the typevar, allows each src, dst, etc. to be different classes
-	dst               : AbstractPath
+	src               : _AbstractPath # using the protocol, not the typevar, allows each src, dst, etc. to be different classes
+	dst               : _AbstractPath
 	filter            : Filter
-	trash             : AbstractPath|None
-	delete_files      : bool
-	no_create         : bool
-	force             : bool
-	global_renames    : bool
-	metadata_only     : bool
-	rename_threshold  : int|None
 	translate_symlinks: bool
 	ignore_symlinks   : bool
 	follow_symlinks   : bool
+
+	delete_files      : bool
+	trash             : _AbstractPath|None
+	force_update      : bool
+	force_replace     : bool
+	no_create         : bool
+	no_renames        : bool
+	global_renames    : bool
+	metadata_only     : bool
+	rename_threshold  : int
+
 	shutdown_src      : bool
 	shutdown_dst      : bool
 	dry_run           : bool
-	log_file          : AbstractPath|None
+
+	log_file          : _AbstractPath|None
 	debug             : bool
 
 	# derived

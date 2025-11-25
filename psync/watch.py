@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import SyncConfig
+from .config import _SyncConfig
 from .filter import PathFilter, AllFilter
 from .log import logger
 from .errors import UnsupportedOperationError

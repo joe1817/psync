@@ -12,11 +12,11 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Iterator
 
-from .config import SyncConfig
+from .config import _SyncConfig
 from .dual_walk import _Relpath, _File, _Dir, _Diff, _DualWalk
 from .helpers import _convert_sep
 from .sftp import RemotePath
-from .types import AbstractPath
+from .types import _AbstractPath
 from .errors import MetadataUpdateError, BrokenSymlinkError, IncompatiblePathError, NewerInDstError, UnsupportedOperationError
 from .log import _exc_summary
 
@@ -39,8 +39,9 @@ def _get_operations(config) -> Iterator["Operation"]:
 			diff.update(dif)
 
 		# renames
-		for rename_from, rename_to in diff.get_rename_pairs(dw.src_dir_hash, dw.dst_dir_hash):
-			renames.extend(factory.get_rename_ops(rename_from, rename_to))
+		if not config.no_renames:
+			for rename_from, rename_to in diff.get_rename_pairs(dw.src_dir_hash, dw.dst_dir_hash):
+				renames.extend(factory.get_rename_ops(rename_from, rename_to))
 
 		# deletes
 		if config.delete_files or config.trash:
@@ -82,8 +83,9 @@ def _get_operations(config) -> Iterator["Operation"]:
 			creates = []
 
 			# renames
-			for rename_from, rename_to in diff.get_rename_pairs():
-				renames.extend(factory.get_rename_ops(rename_from, rename_to))
+			if not config.no_renames:
+				for rename_from, rename_to in diff.get_rename_pairs():
+					renames.extend(factory.get_rename_ops(rename_from, rename_to))
 
 			# deletes
 			if config.delete_files or config.trash:
@@ -126,9 +128,7 @@ def _get_operations(config) -> Iterator["Operation"]:
 class Operation:
 	'''Filesystem operation yielded by `_operations()`.'''
 
-	name  = ""
-
-	config    : SyncConfig
+	config    : _SyncConfig
 	dst       : _Relpath
 	src       : _Relpath | None = None
 	target    : _Relpath | None = None
@@ -182,8 +182,6 @@ class Operation:
 
 @dataclass(frozen=True)
 class RenameFileOperation(Operation):
-	name = "Rename"
-
 	def __post_init__(self):
 		assert self.src is None
 		assert self.target is not None
@@ -199,8 +197,6 @@ class RenameFileOperation(Operation):
 
 @dataclass(frozen=True)
 class RenameDirOperation(Operation):
-	name = "Rename"
-
 	def __post_init__(self):
 		assert self.src is None
 		assert self.target is not None
@@ -216,8 +212,6 @@ class RenameDirOperation(Operation):
 
 @dataclass(frozen=True)
 class DeleteFileOperation(Operation):
-	name = "Delete"
-
 	def __post_init__(self):
 		assert self.src is None
 		assert self.target is None
@@ -238,9 +232,7 @@ class DeleteFileOperation(Operation):
 		return f"- {self.config.dst_name}{self.dst}"
 
 @dataclass(frozen=True)
-class DeleteDirOperation(Operation):
-	name = "Delete Dir"
-
+class DeleteDirOperation(Operation): # Empty dirs only
 	def __post_init__(self):
 		assert self.src is None
 		assert self.target is None
@@ -262,8 +254,6 @@ class DeleteDirOperation(Operation):
 
 @dataclass(frozen=True)
 class TrashFileOperation(Operation):
-	name = "Trash"
-
 	def __post_init__(self):
 		assert self.src is None
 		assert self.target is None
@@ -286,9 +276,7 @@ class TrashFileOperation(Operation):
 		return f"T {self.config.dst_name}{self.dst}"
 
 @dataclass(frozen=True)
-class TrashDirOperation(Operation):
-	name = "Trash Dir"
-
+class TrashDirOperation(Operation): # Empty dirs only
 	def __post_init__(self):
 		assert self.src is None
 		assert self.target is None
@@ -312,8 +300,6 @@ class TrashDirOperation(Operation):
 
 @dataclass(frozen=True)
 class UpdateFileOperation(Operation):
-	name = "Update"
-
 	def __post_init__(self):
 		assert self.src is not None
 		assert self.target is None
@@ -328,8 +314,6 @@ class UpdateFileOperation(Operation):
 
 @dataclass(frozen=True)
 class CreateFileOperation(Operation):
-	name = "Create"
-
 	def __post_init__(self):
 		assert self.src is not None
 		assert self.target is None
@@ -343,24 +327,7 @@ class CreateFileOperation(Operation):
 		return f"+ {self.config.dst_name}{self.dst}"
 
 @dataclass(frozen=True)
-class CreateDirOperation(Operation):
-	name = "Create Dir"
-
-	def __post_init__(self):
-		assert self.src is None
-		assert self.target is None
-
-	def perform(self):
-		(self.config.dst / self.dst).mkdir(exist_ok=True, parents=True)
-
-	@property
-	def summary(self):
-		return f"+ {self.config.dst_name}{self.dst}{self.config.dst_sep}"
-
-@dataclass(frozen=True)
 class CreateSymlinkOperation(Operation):
-	name = "Create Symlink"
-
 	def __post_init__(self):
 		assert self.src is not None # symlink file
 		assert self.target is None
@@ -452,10 +419,23 @@ class CreateSymlinkOperation(Operation):
 	def summary(self):
 		return f"L {self.config.dst_name}{self.dst} -> {self.target}"
 
+@dataclass(frozen=True)
+class CreateDirOperation(Operation): # Empty dirs only
+	def __post_init__(self):
+		assert self.src is None
+		assert self.target is None
+
+	def perform(self):
+		(self.config.dst / self.dst).mkdir(exist_ok=True, parents=True)
+
+	@property
+	def summary(self):
+		return f"+ {self.config.dst_name}{self.dst}{self.config.dst_sep}"
+
 class _OperationFactory:
 	'''Determines which Operations to yield, in accordance with config settings and the _Relpath's type.'''
 
-	def __init__(self, config: SyncConfig):
+	def __init__(self, config: _SyncConfig):
 		self.config = config
 
 	def get_rename_ops(self, dst_relpath:_Relpath, target_relpath:_Relpath) -> Iterator[Operation]:
@@ -473,7 +453,7 @@ class _OperationFactory:
 				target  = target_relpath,
 			)
 
-	def get_delete_ops(self, dst_relpath:_Relpath, diff) -> Iterator[Operation]:
+	def get_delete_ops(self, dst_relpath:_Relpath, diff:_Diff) -> Iterator[Operation]:
 		if isinstance(dst_relpath, _File):
 			if self.config.trash:
 				yield TrashFileOperation(
@@ -499,7 +479,7 @@ class _OperationFactory:
 					dst     = dst_relpath,
 				)
 
-	def get_update_ops(self, src_relpath:_Relpath, dst_relpath:_Relpath, diff) -> Iterator[Operation]:
+	def get_update_ops(self, src_relpath:_Relpath, dst_relpath:_Relpath, diff:_Diff) -> Iterator[Operation]:
 		if isinstance(dst_relpath, _File):
 			src_time = diff.src_file_metadata[src_relpath].mtime
 			dst_time = diff.dst_file_metadata[dst_relpath].mtime
@@ -510,7 +490,7 @@ class _OperationFactory:
 			if src_time > dst_time:
 				do_update = True
 			elif src_time < dst_time:
-				if self.config.force:
+				if self.config.force_update:
 					do_update = True
 				else:
 					self.config.logger.warning(f"'dst' file is newer than 'src' file: {self.config.dst_name}{dst_relpath}")
@@ -540,7 +520,7 @@ class _OperationFactory:
 			#		target  = src_relpath,
 			#	)
 
-	def get_create_ops(self, dst_relpath:_Relpath, diff) -> Iterator[Operation]:
+	def get_create_ops(self, dst_relpath:_Relpath, diff:_Diff) -> Iterator[Operation]:
 		if isinstance(dst_relpath, _File):
 			if not self.config.follow_symlinks and (self.config.src / dst_relpath).is_symlink():
 				yield CreateSymlinkOperation(
@@ -563,7 +543,7 @@ class _OperationFactory:
 				dst     = dst_relpath,
 			)
 
-def _copy(src:AbstractPath, dst:AbstractPath, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
+def _copy(src:_AbstractPath, dst:_AbstractPath, *, exist_ok:bool = True, follow_symlinks:bool = False) -> None:
 	'''Copy file from `src` to `dst`, keeping timestamp metadata. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
 	if dst.exists():
@@ -586,7 +566,7 @@ def _copy(src:AbstractPath, dst:AbstractPath, *, exist_ok:bool = True, follow_sy
 	finally:
 		dst_tmp.unlink(missing_ok=True)
 
-def _move(src:AbstractPath, dst:AbstractPath, *, exist_ok:bool = False) -> None:
+def _move(src:_AbstractPath, dst:_AbstractPath, *, exist_ok:bool = False) -> None:
 	'''Move file from `src` to `dst`. Existing files will be overwritten if `exist_ok` is `True`. Otherwise this method will raise a `FileExistsError`.'''
 
 	if dst.exists():
@@ -609,7 +589,7 @@ def _move(src:AbstractPath, dst:AbstractPath, *, exist_ok:bool = False) -> None:
 	dir.mkdir(exist_ok=True, parents=True)
 	_replace(src, dst)
 
-def _create_symlink(dst:AbstractPath, *, target:str, st, exist_ok:bool = True) -> None:
+def _create_symlink(dst:_AbstractPath, *, target:str, st, exist_ok:bool = True) -> None:
 	if dst.exists():
 		if not exist_ok:
 			raise FileExistsError(17, "Cannot create symlink, dst exists", str(dst))
@@ -646,7 +626,7 @@ def _create_symlink(dst:AbstractPath, *, target:str, st, exist_ok:bool = True) -
 	else:
 		raise MetadataUpdateError(f"Could not update time metadata", str(dst))
 
-def _replace(src:AbstractPath, dst:AbstractPath) -> None:
+def _replace(src:_AbstractPath, dst:_AbstractPath) -> None:
 	'''Move file from `src` to `dst`. Existing files will be overwritten..'''
 
 	try:
@@ -654,6 +634,8 @@ def _replace(src:AbstractPath, dst:AbstractPath) -> None:
 		src.replace(dst)
 	except PermissionError as e:
 		# Remove read-only flag and try again
+		if not src.is_file():
+			raise e
 		make_readonly = False
 		try:
 			dst_stat = dst.stat()

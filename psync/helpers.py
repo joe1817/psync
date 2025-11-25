@@ -5,7 +5,7 @@ from typing import Any
 
 from .errors import IncompatiblePathError
 
-class UniqueIDGenerator:
+class _UniqueIDGenerator:
 	_last_time = 0
 	_counter = 0
 	_lock = threading.Lock()
@@ -54,7 +54,7 @@ def _reverse_dict(old_dict:dict[Any, Any]) -> dict[Any, Any]:
 
 def _merge_iters(src, dst, *, key=lambda x: x):
 	'''
-	Repeatedly yields the lowest element from each iterable, similar to how merge sort works.
+	Repeatedly yields the next lowest element from either iterable, similar to how merge sort works.
 
 	>>> list(_merge_iters([1,3,5], [2,4,6]))
 	[(-1, 1, 2), (1, 3, 2), (-1, 3, 4), (1, 5, 4), (-1, 5, 6), (1, None, 6)]

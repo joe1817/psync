@@ -8,14 +8,14 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, cast, ContextManager, TypeVar
 from collections import namedtuple
 
-from .config import SyncConfig
-from .types import AbstractPath
+from .config import _SyncConfig
+from .types import _AbstractPath
 from .sftp import RemotePath, _RemotePathScanner
 from .errors import IncompatiblePathError
 from .helpers import _merge_iters, _reverse_dict
 from .log import _exc_summary
 
-P = TypeVar("P", bound=AbstractPath) # for dir_list
+P = TypeVar("P", bound=_AbstractPath) # for dir_list
 
 @dataclass(frozen=True)
 class _Metadata:
@@ -74,7 +74,7 @@ class _Relpath:
 	def __hash__(self):
 		return self._real_hash
 
-	def __rtruediv__(self, other:AbstractPath):
+	def __rtruediv__(self, other:_AbstractPath):
 		return other.joinpath(*self.relpath.split(self.sep))
 
 	def __add__(self, other):
@@ -139,7 +139,7 @@ _DirList = namedtuple("_DirList", [
 
 @dataclass(frozen=True)
 class _Diff:
-	config              : SyncConfig
+	config              : _SyncConfig
 	src_parent          : _Dir|None              = None
 	dst_parent          : _Dir|None              = None
 	src_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
@@ -400,7 +400,7 @@ class _Diff:
 					yield a, b
 
 class _DualWalk:
-	def __init__(self, config: SyncConfig, *, bottom_up_lone_dst: bool=True, get_dir_hashes: bool=False):
+	def __init__(self, config: _SyncConfig, *, bottom_up_lone_dst: bool=True, get_dir_hashes: bool=False):
 		self.config = config
 		self.bottom_up_lone_dst = bottom_up_lone_dst
 		self.get_dir_hashes = get_dir_hashes
@@ -414,7 +414,7 @@ class _DualWalk:
 	def __iter__(self):
 		yield from self.dual_walk(self.config.src, self.config.dst)
 
-	def dual_walk(self, src_path: AbstractPath|None, dst_path: AbstractPath|None, *, _bottom_up: bool=False) -> Iterator[_Diff]:
+	def dual_walk(self, src_path: _AbstractPath|None, dst_path: _AbstractPath|None, *, _bottom_up: bool=False) -> Iterator[_Diff]:
 		# don't follow circular symlinks
 		if self.config.follow_symlinks:
 			if src_path is not None:
@@ -571,7 +571,7 @@ class _DualWalk:
 		nonstandard_entries = []
 
 		with scanner as entries:
-			entry: os.DirEntry|AbstractPath
+			entry: os.DirEntry|_AbstractPath
 			for entry in entries:
 				dir_size += 1
 				try:
@@ -772,7 +772,7 @@ class _DualWalk:
 			rejected_src: list[_Relpath] = []
 			for match_normalized in matches:
 				match = match_normalized.unwrapped
-				if type(dst_entry) != type(match) and not self.config.force:
+				if type(dst_entry) != type(match) and not self.config.force_replace:
 					do_reject_dst = True
 					break
 				elif dst_entry.name == match.name:
@@ -926,7 +926,7 @@ class _DualWalk:
 		return {k:rename_map[k] for k in sorted(rename_map.keys())}
 	'''
 
-def _last_bytes(file:AbstractPath, n:int = 1024) -> bytes:
+def _last_bytes(file:_AbstractPath, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''
 
 	file_size = file.stat().st_size

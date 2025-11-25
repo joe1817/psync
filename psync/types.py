@@ -11,11 +11,11 @@ if sys.version_info >= (3, 12):
 else:
     Buffer = Union[bytes, bytearray, memoryview]
 
-# used to make sure AbstractPath's methods return the same type as itself, not any other concrete class that implements AbstractPath
-T_AbstractPath = TypeVar("T_AbstractPath", bound="AbstractPath")
+# used to make sure _AbstractPath's methods return the same type as itself, not any other concrete class that implements _AbstractPath
+T_AbstractPath = TypeVar("T_AbstractPath", bound="_AbstractPath")
 
 @runtime_checkable
-class AbstractPath(Protocol):
+class _AbstractPath(Protocol):
 	'''Protocol class representing the methods a Path-like object needs to do a sync.'''
 	
 	@property

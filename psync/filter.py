@@ -12,7 +12,7 @@ if sys.version_info >= (3, 13):
 else:
 	import glob2 as glob
 
-from .types import AbstractPath
+from .types import _AbstractPath
 from .errors import StateError
 from .log import logger
 
@@ -22,7 +22,7 @@ class Filter:
 	def __init__(self, default:bool = False):
 		self.default = default
 
-	def filter(self, relpath:str, *, root:AbstractPath|str|None = None, default:bool|None = None) -> bool:
+	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
 		raise NotImplementedError()
 
 class PathFilter(Filter):
@@ -352,7 +352,7 @@ class PathFilter(Filter):
 					segment.is_implicit = True
 					yield segment
 
-	def filter(self, relpath:str, *, root:AbstractPath|str|None = None, default:bool|None = None) -> bool:
+	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
 		'''Compare the file path against the filter string.'''
 
 		for segment in self._segments:
@@ -385,7 +385,7 @@ class AllFilter(Filter):
 			raise ValueError("Missing required argument: filters")
 		self.filters = filters
 
-	def filter(self, relpath:str, *, root:AbstractPath|str|None = None, default:bool|None = None) -> bool:
+	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
 		if all(f.filter(relpath, root=root) for f in self.filters):
 			return True
 		else:

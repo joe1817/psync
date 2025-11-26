@@ -16,7 +16,7 @@ class IncompatiblePathError(PermissionError):
 class NewerInDstError(FileExistsError):
 	'''Indicates a newer file in the dst root and `Sync.force_update` is set to `False`.'''
 	def __init__(self, strerror=None, filename=None):
-		super().__init__(17, strerror, filename)	
+		super().__init__(17, strerror, filename)
 
 class StateError(RuntimeError):
 	'''Indicates the object is in (or would be set to) an invalid state.'''
@@ -28,4 +28,8 @@ class ImmutableObjectError(StateError):
 
 class UnsupportedOperationError(RuntimeError):
 	'''Indicates the attempted action is not supported by design.'''
+	pass
+
+class FilesystemErrorLimitError(RuntimeError):
+	'''Indicates too many filesystem errors have occurred.'''
 	pass

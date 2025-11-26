@@ -23,8 +23,8 @@ class _ArgParser:
 	parser.add_argument("dst", help="The root directory to copy files to.")
 
 	parser.add_argument("-f", "--filter", metavar="filter_string", nargs="+", type=str, default="+ **/*", help="The filter string that includes/excludes file system entries from the 'src' and 'dst' directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with \"/\" will apply to directories only. Otherise the pattern will apply only to files. (Defaults to \"+ **/*\", which searches all directories and copies all files.)")
-	parser.add_argument("-H", "--ignore-hidden", action="store_true", default=False, help="Ignore hidden files by default in glob patterns. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
-	parser.add_argument("-I", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
+	parser.add_argument("-ih", "--ignore-hidden", action="store_true", default=False, help="Ignore hidden files by default in glob patterns. That is, wildcards in glob patterns will not match file system entries beginning with a dot. However, globs containing a dot (e.g., \"**/.*\") will still match these file system entries.")
+	parser.add_argument("-ic", "--ignore-case", action="store_true", default=False, help="Ignore case when comparing files to the filter string.")
 
 	parser.add_argument("--no-symlink-translation", action="store_true", default=False, help="Symbolic links will be copied literally, without translation to the dst system.")
 	symlink_handling = parser.add_mutually_exclusive_group()
@@ -45,6 +45,7 @@ class _ArgParser:
 
 	parser.add_argument("--shutdown-src", action="store_true", default=False, help="Shutdown the src system when done.")
 	parser.add_argument("--shutdown-dst", action="store_true", default=False, help="Shutdown the dst system when done.")
+	parser.add_argument("--err-limit", metavar="limit", type=int, default=-1, help="Quit after this many filesystem errors.")
 	parser.add_argument("-d", "--dry-run", action="store_true", default=False, help="Forgo performing any operation that would make a file system change. Changes that would have occurred will still be printed to console.")
 
 	parser.add_argument("-w", "--watch", action="store_true", default=False, help="Will watch the 'src' directory and automatically sync filesystem changes.")
@@ -129,6 +130,7 @@ def main(args:list[str]) -> None:
 
 				shutdown_src       = parsed_args.shutdown_src,
 				shutdown_dst       = parsed_args.shutdown_dst,
+				err_limit          = parsed_args.err_limit,
 				dry_run            = parsed_args.dry_run,
 
 				debug              = parsed_args.debug,

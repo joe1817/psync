@@ -20,7 +20,7 @@ from .helpers import _UniqueIDGenerator, _human_readable_size
 from .sftp import RemotePath
 from .watch import _LocalWatcher
 from .types import _AbstractPath
-from .errors import StateError, UnsupportedOperationError
+from .errors import StateError, UnsupportedOperationError, FilesystemErrorLimitError
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
 class Results:
@@ -34,6 +34,7 @@ class Results:
 		CONNECTION_ERROR     = 1
 		INTERRUPTED_BY_USER  = 2
 		INTERRUPTED_BY_ERROR = 3
+		FS_ERROR_LIMIT       = 4
 
 	def __init__(self, config: _SyncConfig):
 		self.config         : _SyncConfig = config
@@ -160,6 +161,7 @@ class Sync:
 
 			shutdown_src      (bool) : Shutdown the src system when done. (Defaults to `False`.)
 			shutdown_dst      (bool) : Shutdown the dst system when done. (Defaults to `False`.)
+			err_limit          (int) : Quit after this many filesystem errors. A value of `-1` means no limit. (Defaults to `-1`.)
 			dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
 
 			log_file (Path|bool|str) : The path of the log file to use. It will be created if it does not exist. A value of `True` or "auto" means a tempfile will be used for the log, and it will be moved to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
@@ -199,6 +201,7 @@ class Sync:
 
 		self._shutdown_src       : bool = False
 		self._shutdown_dst       : bool = False
+		self._err_limit          : int  = -1
 		self._dry_run            : bool = False
 
 		self._log_file           : Path|bool|None = None # TODO implement RemotePath
@@ -659,6 +662,16 @@ class Sync:
 		self._shutdown_dst = val
 
 	@property
+	def err_limit(self) -> int:
+		return self._err_limit
+
+	@err_limit.setter
+	def err_limit(self, val:int) -> None:
+		if not isinstance(val, int):
+			raise TypeError(f"Bad type for arg 'err_limit' (expected int): {val}")
+		self._err_limit = val
+
+	@property
 	def dry_run(self) -> bool:
 		return self._dry_run
 
@@ -827,6 +840,8 @@ class SyncRunner:
 						results.tally_failure(op, e)
 						if config.debug & Sync.RAISE_FS_ERRORS:
 							raise e
+						elif config.err_limit > 0 and results.failure_count >= config.err_limit:
+							raise FilesystemErrorLimitError()
 						else:
 							config.logger.error(_exc_summary(e))
 
@@ -839,6 +854,11 @@ class SyncRunner:
 			config.logger.info("")
 			config.logger.critical(f"Connection Error: {e}", exc_info=False)
 			results.status = Results.Status.CONNECTION_ERROR
+			results.error = e
+		except FilesystemErrorLimitError as e:
+			config.logger.info("")
+			config.logger.critical(f"Filesystem error limit reached.", exc_info=False)
+			results.status = Results.Status.FS_ERROR_LIMIT
 			results.error = e
 		except Exception as e:
 			config.logger.info("")

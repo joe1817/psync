@@ -109,6 +109,11 @@ class TestSync(unittest.TestCase):
 			sync.shutdown_dst = True
 			self.assertEqual(sync.shutdown_dst, True)
 
+			sync.err_limit = 10
+			self.assertEqual(sync.err_limit, 10)
+			sync.err_limit = -1
+			self.assertEqual(sync.err_limit, -1)
+
 			sync.dry_run = True
 			self.assertEqual(sync.dry_run, True)
 			sync.dry_run = False

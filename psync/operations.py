@@ -51,7 +51,6 @@ def _get_operations(config) -> Iterator["Operation"]:
 				deletes.extend(factory.get_delete_ops(f, diff))
 
 		# updates
-		# TODO subsequent operations need the new dir name if any file is renamed
 		for a, b in diff.dir_matches.items():
 			updates.extend(factory.get_update_ops(a, b, diff))
 		for a, b in diff.file_matches.items():
@@ -91,16 +90,12 @@ def _get_operations(config) -> Iterator["Operation"]:
 			if config.delete_files or config.trash:
 				for f in diff.dst_only_files:
 					deletes.extend(factory.get_delete_ops(f, diff))
-				# TODO deleting dst_only_dirs would allow for a single non-recursive DeleteDir operation,
-				#      but deleting the parent allows for the individual delete operations to be better sorted in console output.
-				#      this can be useful when user wants to combine operations into dir ops, or only show file ops
 				#for d in diff.dst_only_dirs:
 				#	deletes.extend(get_delete_ops(d, None))
 				if diff.src_parent is None:
 					deletes.extend(factory.get_delete_ops(diff.dst_parent, diff))
 
 			# updates
-			# TODO subsequent operations need the new dir name
 			for a, b in diff.dir_matches.items():
 				updates.extend(factory.get_update_ops(a, b, diff))
 			for a, b in diff.file_matches.items():

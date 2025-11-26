@@ -30,6 +30,7 @@ class _SyncConfig:
 
 	shutdown_src      : bool
 	shutdown_dst      : bool
+	err_limit         : int
 	dry_run           : bool
 
 	log_file          : _AbstractPath|None

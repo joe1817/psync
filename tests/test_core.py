@@ -54,17 +54,11 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(sync.trash, root)
 			self.assertEqual(sync.delete_files, False)
 
-			with self.assertRaises(RuntimeError):
-				sync.delete_files = True
-
 			sync.trash = False
 			sync.delete_files = True
 
 			self.assertEqual(sync.trash, None)
 			self.assertEqual(sync.delete_files, True)
-
-			with self.assertRaises(RuntimeError):
-				sync.trash = root
 
 			sync.delete_files = False
 			sync.trash = "auto"
@@ -135,11 +129,9 @@ class TestSync(unittest.TestCase):
 			self.assertEqual(sync.log_file, None)
 
 			sync.log_file = False
-
 			self.assertEqual(sync.log_file, None)
 
 			sync.log_file = "auto"
-
 			self.assertEqual(sync.log_file, True)
 
 			sync.log_level = logging.INFO
@@ -182,7 +174,7 @@ class TestSync(unittest.TestCase):
 			root = Path(temp_root)
 			file_structure = {
 				"src": {
-					"a" : "2",
+					"a" : 1,
 					"b" : None,
 					"c" : Path("./a"),
 					"d" : {
@@ -190,11 +182,13 @@ class TestSync(unittest.TestCase):
 					},
 					"f": {
 					},
+					"g": 10,
 				},
 				"dst": {
-					"a" : ("1", 0),
-					"g": {
+					"a" : 0,
+					"h": {
 					},
+					"i": 10,
 				},
 			}
 			create_file_structure(root, file_structure)
@@ -207,9 +201,10 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				trash = "auto",
+				delete_files = True,
 				force_update = True,
 				force_replace = True,
+				rename_threshold = 0,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -221,8 +216,6 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				force_update = True,
-				force_replace = True,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -322,6 +315,8 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
+				create_dir_tree = True,
+				delete_files = True,
 				trash = "auto",
 				print_level = 100,
 			).run()
@@ -478,7 +473,8 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				trash = "auto",
+				create_dir_tree = True,
+				delete_files = True,
 				print_level = 100,
 			).run()
 
@@ -556,8 +552,8 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				trash = "auto",
-				force_update = True,
+				create_dir_tree = True,
+				delete_files = True,
 				force_replace = True,
 				print_level = 100,
 			).run()
@@ -705,9 +701,8 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				force_update = True,
-				force_replace = True,
 				delete_files = True,
+				force_replace = True,
 				rename_threshold = 0,
 				print_level = 100,
 			).run()
@@ -747,8 +742,7 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				#delete_files = True,
-				trash = "auto",
+				delete_files = True,
 				print_level = 100,
 			).run()
 

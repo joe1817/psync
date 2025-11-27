@@ -28,24 +28,25 @@ class _ArgParser:
 
 	parser.add_argument("--no-symlink-translation", action="store_true", default=False, help="Symbolic links will be copied literally, without translation to the dst system.")
 	symlink_handling = parser.add_mutually_exclusive_group()
-	symlink_handling.add_argument("-L", "--ignore-symlinks", action="store_true", default=False, help="Ignore symbolic links under 'src' and 'dst'. Note that 'src' and 'dst' themselves will be followed regardless of this flag.")
+	symlink_handling.add_argument("--ignore-symlinks", action="store_true", default=False, help="Ignore symbolic links under 'src' and 'dst'. Note that 'src' and 'dst' themselves will be followed regardless of this flag.")
 	symlink_handling.add_argument("--follow-symlinks", action="store_true", default=False, help="Follow symbolic links under 'src' and 'dst'. Note that 'src' and 'dst' themselves will be followed regardless of this flag.")
 
-	extra_handling = parser.add_mutually_exclusive_group()
-	extra_handling.add_argument("-x", "--delete-files", action="store_true", default=False, help="Permanently delete 'extra' files (those that are in 'dst' but not 'src').")
-	extra_handling.add_argument("-t", "--trash", metavar="path", nargs="?", type=str, default=None, const="auto", help="The root directory to move 'extra' files (those that are in 'dst' but not 'src'). Must be on the same file system as 'dst'. If set to \"auto\", then a directory will automatically be made next to 'dst'. Extra files will not be moved if this option is omitted.")
+	parser.add_argument("-ncf", "--no-create-files", action="store_true", default=False, help="Skip creating any files in 'dst'.")
+	parser.add_argument("-cd", "--create-dir-tree", action="store_true", default=False, help="Recreate the directory tree from `src` in `dst`.")
+	parser.add_argument("-nr", "--no-renames", action="store_true", default=False, help="Skip renaming any files or directories in 'dst'.")
+	parser.add_argument("-xf", "--delete-files", action="store_true", default=False, help="Delete files that are in 'dst' but not 'src'. If 'trash' is set, then files will be moved into it instead of deleted.")
+	parser.add_argument("-xd", "--delete-empty-dirs", action="store_true", default=False, help="Delete empty directories that are in 'dst' but not 'src'. If 'trash' is set, then empty directories will be moved into it instead of deleted.")
+	parser.add_argument("-t", "--trash", metavar="path", nargs="?", type=str, default=None, const="auto", help="The root directory to move 'extra' files (those that are in 'dst' but not 'src'). Must be on the same file system as 'dst'. If set to \"auto\", then a directory will automatically be made next to 'dst'. Extra files will not be moved if this option is omitted.")
 
 	parser.add_argument("-fu", "--force-update", action="store_true", default=False, help="Allow replacement of any newer files in 'dst' with older copies in 'src'.")
 	parser.add_argument("-fr", "--force-replace", action="store_true", default=False, help="Allow files to replace directories (and vice versa) when their names match.")
-	parser.add_argument("-nc", "--no-create", action="store_true", default=False, help="Prevent the creation of any files or directories in 'dst'.")
-	parser.add_argument("-nr", "--no-renames", action="store_true", default=False, help="Prevent the renaming of any files or directories in 'dst'.")
 	parser.add_argument("-g", "--global-renames", action="store_true", default=False, help="Search for renamed files between directories.")
 	parser.add_argument("-m", "--metadata_only", action="store_true", default=False, help="Use only metadata in determining which files in 'dst' are the result of a rename. Otherwise, the backup process will also compare the last 1kb of files.")
 	parser.add_argument("-R", "--rename-threshold", metavar="size", type=int, default=10000, help="The minimum size in bytes needed to consider renaming files in dst to match those in 'src'. Renamed files below this threshold will be simply deleted in dst and their replacements copied over.")
 
 	parser.add_argument("--shutdown-src", action="store_true", default=False, help="Shutdown the src system when done.")
 	parser.add_argument("--shutdown-dst", action="store_true", default=False, help="Shutdown the dst system when done.")
-	parser.add_argument("--err-limit", metavar="limit", type=int, default=-1, help="Quit after this many filesystem errors.")
+	parser.add_argument("-e", "--err-limit", metavar="limit", type=int, default=-1, help="Quit after this many filesystem errors.")
 	parser.add_argument("-d", "--dry-run", action="store_true", default=False, help="Forgo performing any operation that would make a file system change. Changes that would have occurred will still be printed to console.")
 
 	parser.add_argument("-w", "--watch", action="store_true", default=False, help="Will watch the 'src' directory and automatically sync filesystem changes.")
@@ -118,12 +119,15 @@ def main(args:list[str]) -> None:
 				ignore_symlinks    = parsed_args.ignore_symlinks,
 				follow_symlinks    = parsed_args.follow_symlinks,
 
+				create_files       = not parsed_args.no_create_files,
+				create_dir_tree    = parsed_args.create_dir_tree,
+				rename_entries     = not parsed_args.no_renames,
 				delete_files       = parsed_args.delete_files,
+				delete_empty_dirs  = parsed_args.delete_empty_dirs,
 				trash              = parsed_args.trash,
+
 				force_update       = parsed_args.force_update,
 				force_replace      = parsed_args.force_replace,
-				no_create          = parsed_args.no_create,
-				no_renames         = parsed_args.no_renames,
 				global_renames     = parsed_args.global_renames,
 				metadata_only      = parsed_args.metadata_only,
 				rename_threshold   = parsed_args.rename_threshold,

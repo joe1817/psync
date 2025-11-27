@@ -149,12 +149,15 @@ class Sync:
 			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
 			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
 
-			delete_files      (bool) : Whether to permanently delete 'extra' files (those that are in `dst` but not `src`). Mutually exclusive with `trash`. (Defaults to `False`.)
-			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_files`. (Defaults to `None`.)
+			create_files      (bool) : Whether to create files in `dst`. (Defaults to `True`.)
+			create_dir_tree   (bool) : Whether to recreate the directory tree from `src` in `dst`. (Defaults to `False`.)
+			rename_entries    (bool) : Whether to rename files and directories in `dst` to match those in `src'. (Defaults to `True`.)
+			delete_files      (bool) : Whether to delete files that are in `dst` but not `src`. If `trash` is set, then files will be moved into it instead of deleted. (Defaults to `False`.)
+			delete_empty_dirs (bool) : Whether to delete empty directories that are in `dst` but not `src`. If `trash` is set, then empty directories will be moved into it instead of deleted. (Defaults to `False`.)
+			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_entries`. (Defaults to `None`.)
+
 			force_update      (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
 			force_replace     (bool) : Whether to allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
-			no_create         (bool) : Whether to prevent the creation of any files or directories in `dst`. (Defaults to `False`.)
-			no_renames        (bool) : Whether to prevent the renaming of any files or directories in `dst`. (Defaults to `False`.)
 			global_renames    (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
 			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `10000`.)
@@ -189,12 +192,15 @@ class Sync:
 		self._ignore_symlinks    : bool = False
 		self._follow_symlinks    : bool = False
 
+		self._create_files       : bool = True
+		self._create_dir_tree    : bool = False
+		self._rename_entries     : bool = True
 		self._delete_files       : bool = False
+		self._delete_empty_dirs  : bool = False
 		self._trash              : _AbstractPath|bool|None = None
+
 		self._force_update       : bool = False
 		self._force_replace      : bool = False
-		self._no_create          : bool = False
-		self._no_renames         : bool = False
 		self._global_renames     : bool = False
 		self._metadata_only      : bool = False
 		self._rename_threshold   : int  = 10000
@@ -226,6 +232,9 @@ class Sync:
 	# Instance methods
 
 	def setup_trash(self, timestamp: str) -> None:
+		# TODO
+		# if trash is set and neither delete option, then enable both delete options
+		# if trash is set and only one delete option, don't enable the other delete option
 		if self.trash is True:
 			trash_name = f"Trash.{timestamp}"
 			trash_path = self.dst.parent / trash_name
@@ -476,6 +485,36 @@ class Sync:
 		self._filter = filter
 
 	@property
+	def create_files(self) -> bool:
+		return self._create_files
+
+	@create_files.setter
+	def create_files(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'create_files' (expected bool): {val}")
+		self._create_files = val
+
+	@property
+	def create_dir_tree(self) -> bool:
+		return self._create_dir_tree
+
+	@create_dir_tree.setter
+	def create_dir_tree(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'create_dir_tree' (expected bool): {val}")
+		self._create_dir_tree = val
+
+	@property
+	def rename_entries(self) -> bool:
+		return self._rename_entries
+
+	@rename_entries.setter
+	def rename_entries(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'rename_entries' (expected bool): {val}")
+		self._rename_entries = val
+
+	@property
 	def delete_files(self) -> bool:
 		return self._delete_files
 
@@ -483,9 +522,18 @@ class Sync:
 	def delete_files(self, val:bool) -> None:
 		if not isinstance(val, bool):
 			raise TypeError(f"Bad type for property 'delete_files' (expected bool): {val}")
-		if val and self.trash:
-			raise StateError("Mutually exclusive properties: 'trash' and 'delete_files'")
 		self._delete_files = val
+
+	@property
+	def delete_empty_dirs(self) -> bool:
+		return self._delete_empty_dirs
+
+	@delete_empty_dirs.setter
+	def delete_empty_dirs(self, val:bool) -> None:
+		logger.warning("'delete_empty_dirs' is not yet implemented.")
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for property 'delete_empty_dirs' (expected bool): {val}")
+		self._delete_empty_dirs = val
 
 	@property
 	def trash(self) -> _AbstractPath|bool|None:
@@ -499,9 +547,6 @@ class Sync:
 		if val is None or val is False:
 			self._trash = None
 			return
-
-		if self.delete_files:
-			raise StateError("Mutually exclusive properties: 'trash' and 'delete_files'")
 
 		if val == "auto" or val is True:
 			self._trash = True # will be finalized in setup_trash
@@ -558,26 +603,6 @@ class Sync:
 		self._force_replace = val
 
 	@property
-	def no_create(self) -> bool:
-		return self._no_create
-
-	@no_create.setter
-	def no_create(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'no_create' (expected bool): {val}")
-		self._no_create = val
-
-	@property
-	def no_renames(self) -> bool:
-		return self._no_renames
-
-	@no_renames.setter
-	def no_renames(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'no_renames' (expected bool): {val}")
-		self._no_renames = val
-
-	@property
 	def global_renames(self) -> bool:
 		return self._global_renames
 
@@ -605,6 +630,8 @@ class Sync:
 	def rename_threshold(self, val:int) -> None:
 		if not isinstance(val, int):
 			raise TypeError(f"Bad type for arg 'rename_threshold' (expected int): {val}")
+		if val < 0:
+			raise ValueError(f"'rename_threshold' must be non-negative.")
 		self._rename_threshold = val
 
 	@property

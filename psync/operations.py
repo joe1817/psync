@@ -23,46 +23,63 @@ from .log import _exc_summary
 def _get_operations(config) -> Iterator["Operation"]:
 	factory = _OperationFactory(config)
 
-	deletes: list["Operation"] = []
-	creates: list["Operation"] = []
-	updates: list["Operation"] = []
-	renames: list["Operation"] = []
-
 	a: _Relpath
 	b: _Relpath
 
 	if config.global_renames:
+		# The entire directory tree needs to be read in to find global renames (ie, directory renames or file renames that span between two different directories).
+
+		deletes: list["Operation"] = []
+		creates: list["Operation"] = []
+		updates: list["Operation"] = []
+		renames: list["Operation"] = []
+
+		necessary_dirs = []
 
 		diff = _Diff(config)
-		dw   = _DualWalk(config, bottom_up_lone_dst=False, get_dir_hashes=True)
+		dw   = _DualWalk(config, get_dir_hashes=True) # bottom_up_lone_dst=False,
 		for dif in dw:
 			diff.update(dif)
+			if len(dif.src_only_files) > 0 and dif.dst_parent is None:
+				necessary_dirs.append(dif.src_parent)
 
 		# renames
-		if not config.no_renames:
+		if config.rename_entries:
 			for rename_from, rename_to in diff.get_rename_pairs(dw.src_dir_hash, dw.dst_dir_hash):
 				renames.extend(factory.get_rename_ops(rename_from, rename_to))
 
 		# deletes
-		if config.delete_files or config.trash:
+		if config.delete_files:
 			for d in diff.dst_only_dirs:
 				deletes.extend(factory.get_delete_ops(d, diff))
+		#elif config.delete_empty_dirs:
+		#	# TODO not implemented
+		#	# In addition to dst_only_dirs, need to remove matched dirs that have no file descendants and did not receive any new file descendants
+		#	dst_empty_dirs = ...
+		#	for d in dst_empty_dirs:
+		#		deletes.extend(factory.get_delete_ops(d, diff))
+		if config.delete_files:
 			for f in diff.dst_only_files:
 				deletes.extend(factory.get_delete_ops(f, diff))
 
 		# updates
-		for a, b in diff.dir_matches.items():
-			updates.extend(factory.get_update_ops(a, b, diff))
+		#for a, b in diff.dir_matches.items():
+		#	updates.extend(factory.get_update_ops(a, b, diff)) # updating dirs currently does nothing
 		for a, b in diff.file_matches.items():
 			updates.extend(factory.get_update_ops(a, b, diff))
 
 		# creates
-		if not config.no_create:
+		if config.create_dir_tree:
 			for d in diff.src_only_dirs:
 				creates.extend(factory.get_create_ops(d, diff))
+		elif config.create_files:
+			for d in necessary_dirs:
+				creates.extend(factory.get_create_ops(d, diff))
+		if config.create_files:
 			for f in diff.src_only_files:
 				creates.extend(factory.get_create_ops(f, diff))
 
+		# renames are already sorted
 		deletes.sort()
 		updates.sort()
 		creates.sort()
@@ -73,51 +90,49 @@ def _get_operations(config) -> Iterator["Operation"]:
 		yield from creates
 
 	else:
+		# No need to read in the whole directory tree when global_renames is False. Instead, a folder-by-folder apprach is faster.
 
-		for diff in _DualWalk(config):
-
-			renames = []
-			deletes = []
-			updates = []
-			creates = []
+		dw = _DualWalk(config)
+		for diff in dw:
 
 			# renames
-			if not config.no_renames:
+			if config.rename_entries:
 				for rename_from, rename_to in diff.get_rename_pairs():
-					renames.extend(factory.get_rename_ops(rename_from, rename_to))
+					yield from factory.get_rename_ops(rename_from, rename_to)
 
 			# deletes
-			if config.delete_files or config.trash:
+			if config.delete_files:
 				for f in diff.dst_only_files:
-					deletes.extend(factory.get_delete_ops(f, diff))
-				#for d in diff.dst_only_dirs:
-				#	deletes.extend(get_delete_ops(d, None))
+					yield from factory.get_delete_ops(f, diff)
 				if diff.src_parent is None:
-					deletes.extend(factory.get_delete_ops(diff.dst_parent, diff))
+					yield from factory.get_delete_ops(diff.dst_parent, diff)
 
 			# updates
-			for a, b in diff.dir_matches.items():
-				updates.extend(factory.get_update_ops(a, b, diff))
+			#for a, b in diff.dir_matches.items():
+			#	updates.extend(factory.get_update_ops(a, b, diff)) # updating dirs currently does nothing
 			for a, b in diff.file_matches.items():
-				updates.extend(factory.get_update_ops(a, b, diff))
+				yield from factory.get_update_ops(a, b, diff)
 
 			# creates
-			if not config.no_create:
-				#for d in diff.src_only_dirs:
-				#	creates.extend(factory.get_create_ops(d, diff))
+			if config.create_dir_tree:
+				# create all matched directories, even if they are empty or contain no files
 				if diff.dst_parent is None:
-					creates.extend(factory.get_create_ops(diff.src_parent, diff))
-				for s in diff.src_only_files:
-					creates.extend(factory.get_create_ops(s, diff))
+					yield from factory.get_create_ops(diff.src_parent, diff)
+			elif config.create_files and len(diff.src_only_files) > 0:
+				# create directories only when they are needed to hold file children
+				if diff.dst_parent is None:
+					yield from factory.get_create_ops(diff.src_parent, diff)
+			if config.create_files:
+				for f in diff.src_only_files:
+					yield from factory.get_create_ops(f, diff)
 
-			deletes.sort()
-			updates.sort()
-			creates.sort()
-
-			yield from renames
-			yield from deletes
-			yield from updates
-			yield from creates
+		# TODO not implemented
+		#if config.delete_empty_dirs:
+		#	dirs_to_delete = ...
+		#	delete_ops = []
+		#	for d in dirs_to_delete:
+		#		delete_ops.extend(factory.get_delete_ops(d, None))
+		#	yield from sorted(delete_ops)
 
 @dataclass(frozen=True)
 class Operation:

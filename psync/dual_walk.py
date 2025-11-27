@@ -406,10 +406,10 @@ class _DualWalk:
 		self.get_dir_hashes = get_dir_hashes
 		self.src_dir_sizes: dict[_Dir, int] = {}
 		self.dst_dir_sizes: dict[_Dir, int] = {}
-		self.src_dir_hash: dict[_Dir, int] = {}
-		self.dst_dir_hash: dict[_Dir, int] = {}
-		self.src_ancestors: set[str] = set()
-		self.dst_ancestors: set[str] = set()
+		self.src_dir_hash : dict[_Dir, int] = {}
+		self.dst_dir_hash : dict[_Dir, int] = {}
+		self._src_ancestors: set[str] = set()
+		self._dst_ancestors: set[str] = set()
 
 	def __iter__(self):
 		yield from self.dual_walk(self.config.src, self.config.dst)
@@ -419,16 +419,16 @@ class _DualWalk:
 		if self.config.follow_symlinks:
 			if src_path is not None:
 				src_true_path = str(src_path.resolve())
-				if src_true_path in self.src_ancestors:
+				if src_true_path in self._src_ancestors:
 					self.config.logger.warning(f"Symlink circular reference: {src_path} -> {src_true_path}")
 					return
-				self.src_ancestors.add(src_true_path)
+				self._src_ancestors.add(src_true_path)
 			if dst_path is not None:
 				dst_true_path = str(dst_path.resolve())
-				if dst_true_path in self.dst_ancestors:
+				if dst_true_path in self._dst_ancestors:
 					self.config.logger.warning(f"Symlink circular reference: {dst_path} -> {dst_true_path}")
 					return
-				self.dst_ancestors.add(dst_true_path)
+				self._dst_ancestors.add(dst_true_path)
 
 		self.config.logger.debug(f"scanning src: {src_path}")
 		self.config.logger.debug(f"scanning dst: {dst_path}")
@@ -457,7 +457,7 @@ class _DualWalk:
 			self.dst_dir_sizes[dst_parent_dir.unwrapped] = dst_dir_size
 
 		# don't try to match with a nonstandard file (socket, named pipe, etc)
-		# TODO? Make _DirList use dicts instead of lists, so removal is easy?
+		# the number of nonstandard files should be low, so removal from list structures isn't *that* bad
 		for f in src_nonstandard:
 			try:
 				dst_files.remove(f)
@@ -533,9 +533,9 @@ class _DualWalk:
 
 		if self.config.follow_symlinks:
 			if src_path is not None:
-				self.src_ancestors.remove(src_true_path)
+				self._src_ancestors.remove(src_true_path)
 			if dst_path is not None:
-				self.dst_ancestors.remove(dst_true_path)
+				self._dst_ancestors.remove(dst_true_path)
 
 	def dir_list(self, dir: P|None, root: P) -> _DirList:
 		'''Returns a tuple of the contents of a directory.'''
@@ -590,9 +590,9 @@ class _DualWalk:
 				else:
 					file_entries.append(entry)
 
-		# sorting should not be necessary
-		#dir_entries.sort(key = lambda x: x.name)
-		#file_entries.sort(key = lambda x: x.name)
+		# ensure entries are sorted
+		dir_entries.sort(key = lambda x: x.name)
+		file_entries.sort(key = lambda x: x.name)
 
 		filter = self.config.filter.filter
 		sep = "/" if isinstance(root, RemotePath) else os.sep
@@ -871,60 +871,6 @@ class _DualWalk:
 		)
 		# self.config.logger.debug(diff)
 		return diff
-
-	'''
-	def combine_renames(self, rename_map):
-		#Combine RenameFileOps into RenameDirOps.
-
-		self.dst_root_relpath = self.dst.name + self.dst_sep if self.trash else ""
-
-		do_combine = True
-		renames_to_check = {}
-
-		while do_combine:
-			do_combine = False
-
-			targets = {} # parent dir -> target parent dir
-			renames_in_dir = {} # parent dir -> list of rename_from
-
-			for rename_from, rename_to in rename_map.items():
-
-				if len(rename_from.norm) == 1:
-					continue
-
-				if rename_from.name != rename_to.name:
-					continue
-
-				parent = rename_from.parent
-				target = rename_to.parent
-
-				if parent not in targets and target not in dst_dir_sizes:
-					targets[parent] = target
-					renames_in_dir[parent] = [rename_from]
-				elif targets[parent] is None:
-					pass
-				elif target != targets[parent]:
-					targets[parent] = None
-					renames_in_dir[parent] = []
-				else:
-					renames_in_dir[parent].append(rename_from)
-
-			for parent, rename_froms in renames_in_dir.items():
-				if dst_dir_sizes[parent] == len(rename_froms):
-					do_combine = True
-					rename_map[parent] = targets[parent]
-					for old_rename_from in rename_froms:
-						del rename_map[old_rename_from]
-					try:
-						diff.dst_only_dirs.remove(parent)
-					except KeyError:
-						parent2 = diff.dir_matches[parent]
-						del diff.dir_matches[parent]
-						diff.src_only_dirs.add(parent2)
-					diff.src_only_dirs.remove(targets[parent])
-
-		return {k:rename_map[k] for k in sorted(rename_map.keys())}
-	'''
 
 def _last_bytes(file:_AbstractPath, n:int = 1024) -> bytes:
 	'''Reads and returns the last `n` bytes of a file.'''

@@ -37,7 +37,7 @@ class _SyncConfig:
 	dry_run            : bool
 
 	log_file           : _AbstractPath|None
-	debug              : bool
+	debug              : bool|int
 
 	# derived
 	src_sep            : str

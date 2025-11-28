@@ -161,6 +161,7 @@ class Sync:
 			global_renames    (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
 			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `10000`.)
+			mirror            (bool) : Equivalent to setting create_dir_tree, delete_files, force_update, and force_replace to `True`. (Defaults to `False`.)
 
 			shutdown_src      (bool) : Shutdown the src system when done. (Defaults to `False`.)
 			shutdown_dst      (bool) : Shutdown the dst system when done. (Defaults to `False`.)
@@ -204,6 +205,7 @@ class Sync:
 		self._global_renames     : bool = False
 		self._metadata_only      : bool = False
 		self._rename_threshold   : int  = 10000
+		self._mirror             : bool = False
 
 		self._shutdown_src       : bool = False
 		self._shutdown_dst       : bool = False
@@ -232,26 +234,19 @@ class Sync:
 	# Instance methods
 
 	def setup_trash(self, timestamp: str) -> None:
-		# TODO
-		# if trash is set and neither delete option, then enable both delete options
-		# if trash is set and only one delete option, don't enable the other delete option
 		if self.trash is True:
 			trash_name = f"Trash.{timestamp}"
 			trash_path = self.dst.parent / trash_name
 			self.trash = trash_path
 
 	def setup_logging(self, timestamp: str) -> None:
-		#if self.log_file is True:
-		#	log_name = f"psync.{timestamp}.log"
-		#	...
-
-		# self.logger will handle records related to a sync operation
 		logger_name = f"psync.{timestamp}"
 		assert logger_name not in logging.Logger.manager.loggerDict
 
-		print_level = logging.DEBUG if self.debug else self.print_level
-		file_level = logging.DEBUG if self.debug else self.file_level
+		print_level = self.print_level
+		file_level = self.file_level
 
+		# self.logger will handle records related to a sync operation
 		self.logger = logging.getLogger(logger_name)
 		self.logger.propagate = False
 		self.logger.setLevel(logging.DEBUG)
@@ -315,41 +310,6 @@ class Sync:
 			self._handler_file.close()
 			if self._tmp_log_file is not None and self._tmp_log_file != self.log_file:
 				_replace(self._tmp_log_file, self.log_file)
-
-	# -------------------------------------------------------------------------
-	# Derived properties
-
-	@property
-	def src_sys(self):
-		return RemotePath.os_name(self.src) if isinstance(self.src, RemotePath) else os.name
-
-	@property
-	def dst_sys(self):
-		return RemotePath.os_name(self.dst) if isinstance(self.dst, RemotePath) else os.name
-
-	@property
-	def src_sep(self):
-		return "/" if isinstance(self.src, RemotePath) else os.sep
-
-	@property
-	def dst_sep(self):
-		return "/" if isinstance(self.dst, RemotePath) else os.sep
-
-	@property
-	def src_name(self):
-		return (self.src.name + self.src_sep) if self._show_root_names else ""
-
-	@property
-	def dst_name(self):
-		return (self.dst.name + self.dst_sep) if self._show_root_names else ""
-
-	@property
-	def trash_name(self):
-		return (self.trash.name + self.dst_sep) if self.trash and self._show_root_names else ""
-
-	@property
-	def sftp_compat(self):
-		return isinstance(self.src, RemotePath) or isinstance(self.dst, RemotePath)
 
 	# -------------------------------------------------------------------------
 	# Collected & validated arguments
@@ -496,7 +456,7 @@ class Sync:
 
 	@property
 	def create_dir_tree(self) -> bool:
-		return self._create_dir_tree
+		return self.mirror or self._create_dir_tree
 
 	@create_dir_tree.setter
 	def create_dir_tree(self, val:bool) -> None:
@@ -516,7 +476,7 @@ class Sync:
 
 	@property
 	def delete_files(self) -> bool:
-		return self._delete_files
+		return self._delete_files or self.mirror or (self.trash and not self._delete_empty_dirs)
 
 	@delete_files.setter
 	def delete_files(self, val:bool) -> None:
@@ -526,7 +486,7 @@ class Sync:
 
 	@property
 	def delete_empty_dirs(self) -> bool:
-		return self._delete_empty_dirs
+		return self._delete_empty_dirs or (self.trash and not self._delete_files)
 
 	@delete_empty_dirs.setter
 	def delete_empty_dirs(self, val:bool) -> None:
@@ -584,7 +544,7 @@ class Sync:
 
 	@property
 	def force_update(self) -> bool:
-		return self._force_update
+		return self.mirror or self._force_update
 
 	@force_update.setter
 	def force_update(self, val:bool) -> None:
@@ -594,7 +554,7 @@ class Sync:
 
 	@property
 	def force_replace(self) -> bool:
-		return self._force_replace
+		return self.mirror or self._force_replace
 
 	@force_replace.setter
 	def force_replace(self, val:bool) -> None:
@@ -750,11 +710,56 @@ class Sync:
 		self._debug = val
 
 	# -------------------------------------------------------------------------
+	# Derived properties
+
+	@property
+	def src_sys(self):
+		return RemotePath.os_name(self.src) if isinstance(self.src, RemotePath) else os.name
+
+	@property
+	def dst_sys(self):
+		return RemotePath.os_name(self.dst) if isinstance(self.dst, RemotePath) else os.name
+
+	@property
+	def src_sep(self):
+		return "/" if isinstance(self.src, RemotePath) else os.sep
+
+	@property
+	def dst_sep(self):
+		return "/" if isinstance(self.dst, RemotePath) else os.sep
+
+	@property
+	def src_name(self):
+		return (self.src.name + self.src_sep) if self._show_root_names else ""
+
+	@property
+	def dst_name(self):
+		return (self.dst.name + self.dst_sep) if self._show_root_names else ""
+
+	@property
+	def trash_name(self):
+		return (self.trash.name + self.dst_sep) if self.trash and self._show_root_names else ""
+
+	@property
+	def sftp_compat(self):
+		return isinstance(self.src, RemotePath) or isinstance(self.dst, RemotePath)
+
+	# -------------------------------------------------------------------------
 	# Not passed to _SyncConfig
 
 	@property
+	def mirror(self) -> bool:
+		return self._mirror
+
+	@mirror.setter
+	def mirror(self, val:bool) -> None:
+		if not isinstance(val, int):
+			raise TypeError(f"Bad type for property 'mirror' (expected bool): {val}")
+		self._mirror = val
+
+	@property
 	def file_level(self) -> int:
-		return self._file_level
+		return logging.DEBUG if self.debug else self._file_level
 
 	@file_level.setter
 	def file_level(self, val:int) -> None:
@@ -764,7 +769,7 @@ class Sync:
 
 	@property
 	def print_level(self) -> int:
-		return self._print_level
+		return logging.DEBUG if self.debug else self._print_level
 
 	@print_level.setter
 	def print_level(self, val:int) -> None:

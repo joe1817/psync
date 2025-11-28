@@ -19,14 +19,14 @@ P = TypeVar("P", bound=_AbstractPath) # for dir_list
 
 @dataclass(frozen=True)
 class _Metadata:
-	'''File metadata that will be used to find probable duplicates.'''
+	'''File metadata that will be used to find probable matches when searching for renames.'''
 
 	size  : int
 	mtime : float
 
 @dataclass(frozen=True, repr=False, eq=False, order=False, unsafe_hash=False)
 class _Relpath:
-	'''Filesystem entries yielded by `_scandir()`.'''
+	'''Filesystem entries yielded by `DualWalk.dir_list()`.'''
 
 	relpath    : str
 	sep        : str

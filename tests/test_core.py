@@ -16,134 +16,97 @@ class TestSync(unittest.TestCase):
 	def setUpClass(cls):
 		core.Sync._RAISE_UNKNOWN_ERRORS = True
 
-	def test_init(self):
+	def test_init__properties(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)
 			sync = core.Sync(root, root)
 
+			# -----------------------------------------------------------------
+			# Getters & Setters
+
+			# simply set each property to its current value
+			with TempLoggingLevel(log.logger, logging.ERROR): # suppress NotYetImplementedError
+				for name in dir(sync):
+					class_attr = getattr(type(sync), name, None)
+					if isinstance(class_attr, property):
+						# fset is the setter function
+						if class_attr.fset is not None:
+							current_value = getattr(sync, name)
+							setattr(sync, name, current_value)
+
+			# -----------------------------------------------------------------
+			# Other Value Setting
+
 			sync.filter = "- a b + c d - **"
 
-			sync.symlink_translation = True
-			self.assertEqual(sync.symlink_translation, True)
-			sync.symlink_translation = False
-			self.assertEqual(sync.symlink_translation, False)
+			sync.trash = root / "trash"
+			self.assertEqual(sync.trash, root / "trash")
+			sync.trash = False
+			self.assertEqual(sync.trash, None)
+			sync.trash = "auto"
+			self.assertEqual(sync.trash, True)
+
+			sync.log_file = root / "tmp.log"
+			self.assertEqual(sync.log_file, root / "tmp.log")
+			sync.log_file = False
+			self.assertEqual(sync.log_file, None)
+			sync.log_file = "auto"
+			self.assertEqual(sync.log_file, True)
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_init__implied_options(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			sync = core.Sync(root, root)
+
+			with TempLoggingLevel(log.logger, logging.ERROR): # suppress NotYetImplementedError
+				sync.create_dir_tree   = False
+				sync.force_update      = False
+				sync.force_replace     = False
+				sync.delete_files      = False
+				sync.delete_empty_dirs = False
+				sync.mirror = True
+				self.assertEqual(sync.create_dir_tree  , True)
+				self.assertEqual(sync.force_update     , True)
+				self.assertEqual(sync.force_replace    , True)
+				self.assertEqual(sync.delete_files     , True)
+				self.assertEqual(sync.delete_empty_dirs, False)
+				sync.mirror = False
+
+				sync.delete_files      = False
+				sync.delete_empty_dirs = False
+				sync.trash = "auto"
+				self.assertEqual(sync.delete_files     , True)
+				self.assertEqual(sync.delete_empty_dirs, False)
+				sync.trash = None
+
+			sync.file_level = logging.INFO
+			sync.print_level = logging.INFO
+			sync.debug = sync.RAISE_FS_ERRORS
+			self.assertEqual(sync.file_level , logging.DEBUG)
+			self.assertEqual(sync.print_level, logging.DEBUG)
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+	def test_init__raises_errors(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			sync = core.Sync(root, root)
 
 			sync.ignore_symlinks = True
 			sync.follow_symlinks = False
-
 			self.assertEqual(sync.ignore_symlinks, True)
 			self.assertEqual(sync.follow_symlinks, False)
-
 			with self.assertRaises(RuntimeError):
 				sync.follow_symlinks = True
 
 			sync.ignore_symlinks = False
 			sync.follow_symlinks = True
-
 			self.assertEqual(sync.ignore_symlinks, False)
 			self.assertEqual(sync.follow_symlinks, True)
-
 			with self.assertRaises(RuntimeError):
 				sync.ignore_symlinks = True
-
-			sync.trash = root
-			sync.delete_files = False
-
-			self.assertEqual(sync.trash, root)
-			self.assertEqual(sync.delete_files, False)
-
-			sync.trash = False
-			sync.delete_files = True
-
-			self.assertEqual(sync.trash, None)
-			self.assertEqual(sync.delete_files, True)
-
-			sync.delete_files = False
-			sync.trash = "auto"
-
-			self.assertEqual(sync.trash, True)
-
-			sync.force_update = True
-			self.assertEqual(sync.force_update, True)
-			sync.force_update = False
-			self.assertEqual(sync.force_update, False)
-
-			sync.force_replace = True
-			self.assertEqual(sync.force_replace, True)
-			sync.force_replace = False
-			self.assertEqual(sync.force_replace, False)
-
-			sync.no_create = True
-			self.assertEqual(sync.no_create, True)
-			sync.no_create = False
-			self.assertEqual(sync.no_create, False)
-
-			sync.no_renames = True
-			self.assertEqual(sync.no_renames, True)
-			sync.no_renames = False
-			self.assertEqual(sync.no_renames, False)
-
-			sync.global_renames = True
-			self.assertEqual(sync.global_renames, True)
-			sync.global_renames = False
-			self.assertEqual(sync.global_renames, False)
-
-			sync.metadata_only = True
-			self.assertEqual(sync.metadata_only, True)
-			sync.metadata_only = False
-			self.assertEqual(sync.metadata_only, False)
-
-			sync.rename_threshold = 100
-			self.assertEqual(sync.rename_threshold, 100)
-			sync.rename_threshold = 0
-			self.assertEqual(sync.rename_threshold, 0)
-
-			sync.shutdown_src = True
-			self.assertEqual(sync.shutdown_src, True)
-			sync.shutdown_dst = True
-			self.assertEqual(sync.shutdown_dst, True)
-
-			sync.err_limit = 10
-			self.assertEqual(sync.err_limit, 10)
-			sync.err_limit = -1
-			self.assertEqual(sync.err_limit, -1)
-
-			sync.dry_run = True
-			self.assertEqual(sync.dry_run, True)
-			sync.dry_run = False
-			self.assertEqual(sync.dry_run, False)
-
-			sync.log_file = root / "tmp.log"
-
-			self.assertEqual(sync.log_file, root / "tmp.log")
-
-			sync.log_level = logging.ERROR
-			sync.print_level = logging.ERROR
-
-			self.assertEqual(sync.print_level, logging.ERROR)
-			self.assertEqual(sync.log_level, logging.ERROR)
-
-			sync.log_file = None
-			self.assertEqual(sync.log_file, None)
-
-			sync.log_file = False
-			self.assertEqual(sync.log_file, None)
-
-			sync.log_file = "auto"
-			self.assertEqual(sync.log_file, True)
-
-			sync.log_level = logging.INFO
-			self.assertEqual(sync.log_level, logging.INFO)
-
-			sync.no_header = True
-			self.assertEqual(sync.no_header, True)
-			sync.no_header = False
-			self.assertEqual(sync.no_header, False)
-
-			sync.no_footer = True
-			self.assertEqual(sync.no_footer, True)
-			sync.no_footer = False
-			self.assertEqual(sync.no_footer, False)
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

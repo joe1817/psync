@@ -19,7 +19,7 @@ class TempLoggingLevel:
 	def __exit__(self, exc_type, exc_val, exc_tb):
 		self.logger.setLevel(self.old_level)
 
-def hash_directory(root:Path, *, follow_symlinks:bool=False, ignore_empty_dirs:bool=False, verbose:bool=False, include_mtime:bool=False):
+def hash_directory(root:Path, *, follow_symlinks=False, ignore_empty_dirs=False, verbose=False, include_mtime=False):
 	if isinstance(root, RemotePath):
 		join = lambda x, y: x / y
 		walk = RemotePath.walk
@@ -37,7 +37,7 @@ def hash_directory(root:Path, *, follow_symlinks:bool=False, ignore_empty_dirs:b
 	if verbose:
 		print("--- Hash Start ---")
 	hasher = hashlib.sha256()
-	for dir, dirnames, filenames in walk(root, followlinks=follow_symlinks):
+	for dir, dirnames, filenames in walk(root, followlinks=bool(follow_symlinks)):
 		if ignore_empty_dirs and not filenames:
 			continue
 		dirnames.sort(key=lambda x: (normcase(x), x))

@@ -456,7 +456,7 @@ class Sync:
 
 	@property
 	def create_dir_tree(self) -> bool:
-		return self.mirror or self._create_dir_tree
+		return self._mirror or self._create_dir_tree
 
 	@create_dir_tree.setter
 	def create_dir_tree(self, val:bool) -> None:
@@ -476,7 +476,7 @@ class Sync:
 
 	@property
 	def delete_files(self) -> bool:
-		return self._delete_files or self.mirror or (self.trash and not self._delete_empty_dirs)
+		return self._delete_files or self._mirror or bool(self._trash and not self._delete_empty_dirs)
 
 	@delete_files.setter
 	def delete_files(self, val:bool) -> None:
@@ -486,7 +486,7 @@ class Sync:
 
 	@property
 	def delete_empty_dirs(self) -> bool:
-		return self._delete_empty_dirs or (self.trash and not self._delete_files)
+		return self._delete_empty_dirs
 
 	@delete_empty_dirs.setter
 	def delete_empty_dirs(self, val:bool) -> None:
@@ -544,7 +544,7 @@ class Sync:
 
 	@property
 	def force_update(self) -> bool:
-		return self.mirror or self._force_update
+		return self._mirror or self._force_update
 
 	@force_update.setter
 	def force_update(self, val:bool) -> None:
@@ -554,7 +554,7 @@ class Sync:
 
 	@property
 	def force_replace(self) -> bool:
-		return self.mirror or self._force_replace
+		return self._mirror or self._force_replace
 
 	@force_replace.setter
 	def force_replace(self, val:bool) -> None:
@@ -705,8 +705,8 @@ class Sync:
 
 	@debug.setter
 	def debug(self, val:bool|int) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'debug' (expected bool): {val}")
+		if not isinstance(val, bool|int):
+			raise TypeError(f"Bad type for arg 'debug' (expected bool|int): {val}")
 		self._debug = val
 
 	# -------------------------------------------------------------------------
@@ -714,11 +714,11 @@ class Sync:
 
 	@property
 	def src_sys(self):
-		return RemotePath.os_name(self.src) if isinstance(self.src, RemotePath) else os.name
+		return RemotePath.os_name(self.src.hostname) if isinstance(self.src, RemotePath) else os.name
 
 	@property
 	def dst_sys(self):
-		return RemotePath.os_name(self.dst) if isinstance(self.dst, RemotePath) else os.name
+		return RemotePath.os_name(self.dst.hostname) if isinstance(self.dst, RemotePath) else os.name
 
 	@property
 	def src_sep(self):

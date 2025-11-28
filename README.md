@@ -13,11 +13,12 @@
 - `--dry-run` option to print potential results without actually making filesystem changes.
 
 ## Requirements
-- python 3.13+ (earlier versions can be used if you install the glob2 package)
+- python 3.13+
+  - python 3.9+ if the `glob2` package is installed
 
 ## Dependencies
-- paramiko (only if you intend to use SFTP)
-- watchdog (only if you intend to watch for filesystem changes)
+- `paramiko` (only if you intend to use SFTP)
+- `watchdog` (only if you intend to watch for filesystem changes)
 
 ## Examples
 
@@ -25,7 +26,7 @@
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/`, replacing files whose modtimes are newer in `src/`.
 
-`python -m psync src dst -x`
+`python -m psync src dst -xf`
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/` and deletes extra files (i.e., files that exist in `dst/` but not `src/`).
 
@@ -33,17 +34,21 @@
 
 &emsp; ↳ Recursively copies files inside `src/` to `dst/` and moves extra files into `trash/`.
 
+`python -m psync src dst -f *.txt`
+
+&emsp; ↳ Copies .txt files inside `src/` to `dst/`. This is a non-recursive copy due to the filter matching only top-level files.
+
 `python -m psync src user@192.168.1.100/dst`
 
-&emsp; ↳ Sync using SFTP the local `src/` directory to the remote `dst/` directory.
+&emsp; ↳ Sync the local `src/` directory to the remote `dst/` directory using SFTP.
 
-`python -m psync src dst -w -x -R 0 -nhf`
+`python -m psync src dst -w -xf -nhf`
 
-&emsp; ↳ Watch the `src/` directory and sync it to `dst/` whenever there is a filesystem change. Delete files in `dst/`. Rename files of any size. Don't print header or footer for these sync operations.
+&emsp; ↳ Watch the `src/` directory and sync it to `dst/` whenever there is a filesystem change. Delete files in `dst/`. Don't print header or footer for these sync operations.
 
 `python -m psync src dst !args.txt`
 
-&emsp; ↳ Recursively copies files inside `src/` to `dst/`, using arguments from the file, `args.txt`.
+&emsp; ↳ Recursively copies files inside `src/` to `dst/`, reading additional arguments from `args.txt`.
 
 ### Filtering
 

@@ -105,30 +105,31 @@ class RemotePath:
 	@classmethod
 	def get_netlocs_from_hostname(cls, hostname: str):
 		'''Returns the first connection with the given hostname.'''
-		
+
 		for netloc in cls.ssh_connections:
 			if netloc == hostname or netloc.endswith(f"@{hostname}"):
 				yield netloc
 
 	@classmethod
-	def os_name(cls, path:"RemotePath") -> str: # TODO use hostname
+	def os_name(cls, hostname: str) -> str:
 		'''Get the server's os name. Currently returns either 'nt' or 'posix'.'''
 
 		try:
-			os_name = cls.os_names[path.hostname]
+			os_name = cls.os_names[hostname]
 		except KeyError:
-			ssh = cls.ssh_connections[path.netloc]
+			netloc = cls.get_netlocs_from_hostname(hostname)
+			ssh = cls.ssh_connections[next(netloc)]
 			stdin, stdout, stderr = ssh.exec_command("uname -a")
 			error = stderr.read().decode().strip()
 			os_name = "nt" if bool(error) else "posix"
-			cls.os_names[path.hostname] = os_name
+			cls.os_names[hostname] = os_name
 		return os_name
 
 	@classmethod
-	def sep(cls, path:"RemotePath") -> str: # TODO use hostname
+	def sep(cls, hostname: str) -> str:
 		'''Get the path separator used on the system.'''
 
-		return "\\" if cls.os_name(path) == "nt" else "/"
+		return "\\" if cls.os_name(hostname) == "nt" else "/"
 
 	@classmethod
 	def shutdown(cls, hostname: str) -> None:

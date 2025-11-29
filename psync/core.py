@@ -9,7 +9,7 @@ import tempfile
 from enum import Enum
 from pathlib import Path
 from dataclasses import fields
-from typing import Counter as CounterType
+from typing import Literal, Final, Counter as CounterType
 from collections import Counter, namedtuple
 
 from .config import _SyncConfig
@@ -126,9 +126,12 @@ class Sync:
 		        Log File: path/to/log/psync_20251015_201523.log
 	'''
 
+	_AUTO_LOGFILE   : Final[object] = object()
+	_AUTO_TRASH_DIR : Final[object] = object()
+
 	# debug flags
-	RAISE_UNKNOWN_ERRORS = 2
-	RAISE_FS_ERRORS      = 4
+	RAISE_UNKNOWN_ERRORS : Final[int] = 2
+	RAISE_FS_ERRORS      : Final[int] = 4
 
 	class _SyncState(Enum):
 		INVALID    = 0
@@ -151,7 +154,7 @@ class Sync:
 
 			create_files      (bool) : Whether to create files in `dst`. (Defaults to `True`.)
 			create_dir_tree   (bool) : Whether to recreate the directory tree from `src` in `dst`. (Defaults to `False`.)
-			rename_entries    (bool) : Whether to rename files and directories in `dst` to match those in `src'. (Defaults to `True`.)
+			renames           (bool) : Whether to rename files and directories in `dst` to match those in `src'. (Defaults to `True`.)
 			delete_files      (bool) : Whether to delete files that are in `dst` but not `src`. If `trash` is set, then files will be moved into it instead of deleted. (Defaults to `False`.)
 			delete_empty_dirs (bool) : Whether to delete empty directories that are in `dst` but not `src`. If `trash` is set, then empty directories will be moved into it instead of deleted. (Defaults to `False`.)
 			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_entries`. (Defaults to `None`.)
@@ -159,7 +162,7 @@ class Sync:
 			force_update      (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
 			force_replace     (bool) : Whether to allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
 			global_renames    (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
-			metadata_only     (bool) : Whether to use only metadata in determining which files in `dst` are the result of a rename. If `False`, the backup process will also compare the last 1kb of files. (Defaults to `False`.)
+			content_match     (bool) : Whether to read the last 1kb of files when finding renamed files in `dst`. If `False`, the backup process will rely solely on file metadata. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `10000`.)
 			mirror            (bool) : Equivalent to setting create_dir_tree, delete_files, force_update, and force_replace to `True`. (Defaults to `False`.)
 
@@ -195,15 +198,15 @@ class Sync:
 
 		self._create_files       : bool = True
 		self._create_dir_tree    : bool = False
-		self._rename_entries     : bool = True
+		self._renames            : bool = True
 		self._delete_files       : bool = False
 		self._delete_empty_dirs  : bool = False
-		self._trash              : _AbstractPath|bool|None = None
+		self._trash              : _AbstractPath|Literal[_AUTO_TRASH_DIR]|None = None
 
 		self._force_update       : bool = False
 		self._force_replace      : bool = False
 		self._global_renames     : bool = False
-		self._metadata_only      : bool = False
+		self._content_match      : bool = False
 		self._rename_threshold   : int  = 10000
 		self._mirror             : bool = False
 
@@ -212,10 +215,10 @@ class Sync:
 		self._err_limit          : int  = -1
 		self._dry_run            : bool = False
 
-		self._log_file           : Path|bool|None = None # TODO implement RemotePath
+		self._log_file           : Path|Literal[_AUTO_LOGFILE]|None = None # TODO implement RemotePath
 		self._tmp_log_file       : Path|None = None
-		self._file_level         : int = logging.DEBUG # log file level
-		self._print_level        : int = logging.DEBUG
+		self._file_level         : int = logging.INFO # log file level
+		self._print_level        : int = logging.INFO
 		self._debug              : bool|int = False
 
 		# no properties for these
@@ -234,7 +237,7 @@ class Sync:
 	# Instance methods
 
 	def setup_trash(self, timestamp: str) -> None:
-		if self.trash is True:
+		if self.trash is Sync._AUTO_TRASH_DIR:
 			trash_name = f"Trash.{timestamp}"
 			trash_path = self.dst.parent / trash_name
 			self.trash = trash_path
@@ -272,7 +275,7 @@ class Sync:
 
 		log_file : Path|None = None
 		tmp_log_file : Path|None = None
-		if self.log_file is True:
+		if self.log_file is Sync._AUTO_LOGFILE:
 			log_file = Path.home() / f"{self.logger.name}.log"
 			with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as tmp_log:
 				tmp_log_file = Path(tmp_log.name)
@@ -465,14 +468,14 @@ class Sync:
 		self._create_dir_tree = val
 
 	@property
-	def rename_entries(self) -> bool:
-		return self._rename_entries
+	def renames(self) -> bool:
+		return self._renames
 
-	@rename_entries.setter
-	def rename_entries(self, val:bool) -> None:
+	@renames.setter
+	def renames(self, val:bool) -> None:
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'rename_entries' (expected bool): {val}")
-		self._rename_entries = val
+			raise TypeError(f"Bad type for property 'renames' (expected bool): {val}")
+		self._renames = val
 
 	@property
 	def delete_files(self) -> bool:
@@ -496,7 +499,7 @@ class Sync:
 		self._delete_empty_dirs = val
 
 	@property
-	def trash(self) -> _AbstractPath|bool|None:
+	def trash(self) -> _AbstractPath|Literal[_AUTO_TRASH_DIR]|None:
 		return self._trash
 
 	@trash.setter
@@ -509,7 +512,7 @@ class Sync:
 			return
 
 		if val == "auto" or val is True:
-			self._trash = True # will be finalized in setup_trash
+			self._trash = Sync._AUTO_TRASH_DIR # will be finalized in setup_trash
 			return
 
 		trash: _AbstractPath
@@ -573,14 +576,14 @@ class Sync:
 		self._global_renames = val
 
 	@property
-	def metadata_only(self) -> bool:
-		return self._metadata_only
+	def content_match(self) -> bool:
+		return self._content_match
 
-	@metadata_only.setter
-	def metadata_only(self, val:bool) -> None:
+	@content_match.setter
+	def content_match(self, val:bool) -> None:
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'metadata_only' (expected bool): {val}")
-		self._metadata_only = val
+			raise TypeError(f"Bad type for arg 'content_match' (expected bool): {val}")
+		self._content_match = val
 
 	@property
 	def rename_threshold(self) -> int:
@@ -669,7 +672,7 @@ class Sync:
 		self._dry_run = val
 
 	@property
-	def log_file(self) -> Path|bool|None:
+	def log_file(self) -> Path|Literal[_AUTO_LOGFILE]|None:
 		return self._log_file
 
 	@log_file.setter
@@ -684,7 +687,7 @@ class Sync:
 			self._log_file = None
 			return
 		if val == "auto" or val is True:
-			self._log_file = True # will be finalized in setup_logging
+			self._log_file = Sync._AUTO_LOGFILE # will be finalized in setup_logging
 			return
 
 		log_file : Path

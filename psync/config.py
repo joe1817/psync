@@ -20,7 +20,7 @@ class _SyncConfig:
 
 	create_files       : bool
 	create_dir_tree    : bool
-	rename_entries     : bool
+	renames            : bool
 	delete_files       : bool
 	delete_empty_dirs  : bool
 	trash              : _AbstractPath|None
@@ -28,7 +28,7 @@ class _SyncConfig:
 	force_update       : bool
 	force_replace      : bool
 	global_renames     : bool
-	metadata_only      : bool
+	content_match      : bool
 	rename_threshold   : int
 
 	shutdown_src       : bool

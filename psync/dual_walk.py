@@ -448,30 +448,9 @@ class _DualWalk:
 		dst_parent_dir, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, dst_nonstandard = dst_list
 
 		if src_parent_dir:
-			self.src_dir_sizes[src_parent_dir.unwrapped] = src_dir_size
+			self.src_dir_sizes[src_parent_dir] = src_dir_size
 		if dst_parent_dir:
-			self.dst_dir_sizes[dst_parent_dir.unwrapped] = dst_dir_size
-
-		# don't try to match with a nonstandard file (socket, named pipe, etc)
-		# the number of nonstandard files should be low, so removal from list structures isn't *that* bad
-		for f in src_nonstandard:
-			try:
-				dst_files.remove(f)
-			except ValueError:
-				pass
-			try:
-				dst_dirs.remove(f)
-			except ValueError:
-				pass
-		for f in dst_nonstandard:
-			try:
-				src_files.remove(f)
-			except ValueError:
-				pass
-			try:
-				src_dirs.remove(f)
-			except ValueError:
-				pass
+			self.dst_dir_sizes[dst_parent_dir] = dst_dir_size
 
 		diff = self.dir_diff(src_list, dst_list)
 
@@ -510,9 +489,9 @@ class _DualWalk:
 			if src_parent_dir is not None:
 				if len(src_files) + len(src_dirs) == src_dir_size:
 					try:
-						dirs = [self.src_dir_hash[d.unwrapped] for d in src_dirs] # raises KeyError
+						dirs = [self.src_dir_hash[d] for d in src_dirs] # raises KeyError
 						files = sorted((k.name,v) for k,v in src_file_metadata.items())
-						self.src_dir_hash[src_parent_dir.unwrapped] = hash(tuple(files + dirs))
+						self.src_dir_hash[src_parent_dir] = hash(tuple(files + dirs))
 					except KeyError:
 						# hash unknown for some subdir, so it's unknown for this dir too
 						pass
@@ -520,9 +499,9 @@ class _DualWalk:
 			if dst_parent_dir is not None:
 				if len(dst_files) + len(dst_dirs) == dst_dir_size:
 					try:
-						dirs = [self.dst_dir_hash[d.unwrapped] for d in dst_dirs] # raises KeyError
+						dirs = [self.dst_dir_hash[d] for d in dst_dirs] # raises KeyError
 						files = sorted((k.name,v) for k,v in dst_file_metadata.items())
-						self.dst_dir_hash[dst_parent_dir.unwrapped] = hash(tuple(files + dirs))
+						self.dst_dir_hash[dst_parent_dir] = hash(tuple(files + dirs))
 					except KeyError:
 						# hash unknown for some subdir, so it's unknown for this dir too
 						pass
@@ -536,12 +515,12 @@ class _DualWalk:
 	def dir_list(self, dir: P|None, root: P) -> _DirList:
 		'''Returns a tuple of the contents of a directory.'''
 
-		parent_dir       : _Normalized|None = None
-		dirs             : list[_Normalized]  = [] # empty data structs are better for updating/extending than None
-		files            : list[_Normalized] = []
-		dir_size         : int = 0
-		file_metadata    : dict[_File, _Metadata] = {}
-		nonstandard_files: list[_Normalized] = []
+		parent_dir        : _Dir|None = None
+		dirs              : list[_Dir]  = [] # empty data structs are better for updating/extending than None
+		files             : list[_File] = []
+		dir_size          : int = 0
+		file_metadata     : dict[_File, _Metadata] = {}
+		nonstandard_files : list[_File] = []
 
 		try:
 			if dir is None:
@@ -613,7 +592,7 @@ class _DualWalk:
 				self.config.logger.warning(f"Ignoring incompatible dir: {root_name}{dir_relpath}{sep}")
 				continue
 
-			dirs.append(_Normalized(d))
+			dirs.append(d)
 
 		# prune files
 		for entry in file_entries:
@@ -654,7 +633,7 @@ class _DualWalk:
 			if self.config.sftp_compat:
 				mtime = float(int(mtime))
 
-			files.append(_Normalized(f))
+			files.append(f)
 			file_metadata[f] = _Metadata(size=size, mtime=mtime)
 
 		for entry in nonstandard_entries:
@@ -674,15 +653,13 @@ class _DualWalk:
 			except IncompatiblePathError as e:
 				continue
 
-			nonstandard_files.append(_Normalized(f))
+			nonstandard_files.append(f)
 
 		parent_relpath = str(dir.relative_to(root))
-		parent_dir = _Normalized(
-			_Dir(
-				relpath = parent_relpath,
-				sep = sep,
-				dst_sys = self.config.dst_sys,
-			)
+		parent_dir = _Dir(
+			relpath = parent_relpath,
+			sep     = sep,
+			dst_sys = self.config.dst_sys,
 		)
 
 		return _DirList(
@@ -697,8 +674,8 @@ class _DualWalk:
 	def dir_diff(self, src_list: _DirList, dst_list: _DirList) -> _Diff:
 		'''Returns a tuple of the differences between of two directories.'''
 
-		src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, _ = src_list
-		dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, _ = dst_list
+		src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, src_nonstandard = src_list
+		dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, dst_nonstandard = dst_list
 
 		src_only_dirs : OrderedSet[_Dir]   = OrderedSet()
 		dst_only_dirs : OrderedSet[_Dir]   = OrderedSet()
@@ -739,26 +716,38 @@ class _DualWalk:
 		in_src_only: dict[_Normalized, list[_Normalized]] = {}
 
 		for d in dst_dirs:
-			in_dst[d] = []
+			in_dst[_Normalized(d)] = []
 		for f in dst_files:
-			in_dst[f] = []
+			in_dst[_Normalized(f)] = []
 
 		for d in src_dirs:
 			try:
-				in_dst[d].append(d)
+				in_dst[_Normalized(d)].append(_Normalized(d))
 			except KeyError:
 				try:
-					in_src_only[d].append(d)
+					in_src_only[_Normalized(d)].append(_Normalized(d))
 				except KeyError:
-					in_src_only[d] = [d]
+					in_src_only[_Normalized(d)] = [_Normalized(d)]
 		for f in src_files:
 			try:
-				in_dst[f].append(f)
+				in_dst[_Normalized(f)].append(_Normalized(f))
 			except KeyError:
 				try:
-					in_src_only[f].append(f)
+					in_src_only[_Normalized(f)].append(_Normalized(f))
 				except KeyError:
-					in_src_only[f] = [f]
+					in_src_only[_Normalized(f)] = [_Normalized(f)]
+
+		# don't try to match with a nonstandard file (socket, named pipe, etc)
+		for f in src_nonstandard:
+			try:
+				del in_dst[_Normalized(f)]
+			except KeyError:
+				pass
+		for f in dst_nonstandard:
+			try:
+				del in_src_only[_Normalized(f)]
+			except ValueError:
+				pass
 
 		for dst_normalized, matches in in_dst.items():
 			dst_entry = dst_normalized.unwrapped
@@ -852,8 +841,8 @@ class _DualWalk:
 
 		diff = _Diff(
 			self.config,
-			src_parent = None if src_parent is None else src_parent.unwrapped,
-			dst_parent = None if dst_parent is None else dst_parent.unwrapped,
+			src_parent = None if src_parent is None else src_parent,
+			dst_parent = None if dst_parent is None else dst_parent,
 			src_file_metadata   = src_file_metadata,
 			dst_file_metadata   = dst_file_metadata,
 			src_only_dirs       = src_only_dirs,

@@ -41,7 +41,7 @@ class _ArgParser:
 	parser.add_argument("-fu", "--force-update", action="store_true", help="Allow replacement of any newer files in 'dst' with older copies in 'src'.")
 	parser.add_argument("-fr", "--force-replace", action="store_true", help="Allow files to replace directories (and vice versa) when their names match.")
 	parser.add_argument("-g", "--global-renames", action="store_true", help="Search for renamed files between directories.")
-	parser.add_argument("-m", "--metadata_only", action="store_true", help="Use only metadata in determining which files in 'dst' are the result of a rename. Otherwise, the backup process will also compare the last 1kb of files.")
+	parser.add_argument("-m", "--metadata-only", action="store_true", help="Use only metadata in determining which files in 'dst' are the result of a rename. Otherwise, the backup process will also compare the last 1kb of files.")
 	parser.add_argument("-R", "--rename-threshold", metavar="size", type=int, default=10000, help="The minimum size in bytes needed to consider renaming files in dst to match those in 'src'. Renamed files below this threshold will be simply deleted in dst and their replacements copied over.")
 	parser.add_argument("-M", "--mirror", action="store_true", help="Equivalent to --create-dir-tree, --delete-files, --force-update, and --force-replace.")
 

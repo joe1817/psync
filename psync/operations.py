@@ -44,7 +44,7 @@ def _get_operations(config) -> Iterator["Operation"]:
 				necessary_dirs.append(dif.src_parent)
 
 		# renames
-		if config.rename_entries:
+		if config.renames:
 			for rename_from, rename_to in diff.get_rename_pairs(dw.src_dir_hash, dw.dst_dir_hash):
 				renames.extend(factory.get_rename_ops(rename_from, rename_to))
 
@@ -96,7 +96,7 @@ def _get_operations(config) -> Iterator["Operation"]:
 		for diff in dw:
 
 			# renames
-			if config.rename_entries:
+			if config.renames:
 				for rename_from, rename_to in diff.get_rename_pairs():
 					yield from factory.get_rename_ops(rename_from, rename_to)
 

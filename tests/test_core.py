@@ -44,14 +44,14 @@ class TestSync(unittest.TestCase):
 			sync.trash = False
 			self.assertEqual(sync.trash, None)
 			sync.trash = "auto"
-			self.assertEqual(sync.trash, True)
+			self.assertEqual(sync.trash, sync._AUTO_TRASH_DIR)
 
 			sync.log_file = root / "tmp.log"
 			self.assertEqual(sync.log_file, root / "tmp.log")
 			sync.log_file = False
 			self.assertEqual(sync.log_file, None)
 			sync.log_file = "auto"
-			self.assertEqual(sync.log_file, True)
+			self.assertEqual(sync.log_file, sync._AUTO_LOGFILE)
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -624,7 +624,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				metadata_only = True,
+				content_match = True,
 				rename_threshold = 0,
 				print_level = 100,
 			).run()
@@ -881,7 +881,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				global_renames = True,
-				metadata_only = True,
+				content_match = True,
 				rename_threshold = 0,
 				print_level = 100,
 			).run()

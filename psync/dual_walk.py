@@ -9,6 +9,7 @@ from typing import Any, Iterator, cast, ContextManager, TypeVar
 from collections import namedtuple
 
 from .config import _SyncConfig
+from .ordered_set import OrderedSet
 from .types import _AbstractPath
 from .sftp import RemotePath, _RemotePathScanner
 from .errors import IncompatiblePathError
@@ -144,14 +145,14 @@ class _Diff:
 	dst_parent          : _Dir|None              = None
 	src_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
 	dst_file_metadata   : dict[_File, _Metadata] = field(default_factory=dict)
-	src_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set, Python 3.7+ required
-	dst_only_dirs       : dict[_Dir, None]       = field(default_factory=dict) # used as sorted set
-	src_only_files      : dict[_File, None]      = field(default_factory=dict) # used as sorted set
-	dst_only_files      : dict[_File, None]      = field(default_factory=dict) # used as sorted set
+	src_only_dirs       : OrderedSet[_Dir]       = field(default_factory=OrderedSet)
+	dst_only_dirs       : OrderedSet[_Dir]       = field(default_factory=OrderedSet)
+	src_only_files      : OrderedSet[_File]      = field(default_factory=OrderedSet)
+	dst_only_files      : OrderedSet[_File]      = field(default_factory=OrderedSet)
 	dir_matches         : dict[_Dir, _Dir]       = field(default_factory=dict)
 	file_matches        : dict[_File, _File]     = field(default_factory=dict)
-	ignored_src_entries : set[_Relpath]          = field(default_factory=set)
-	ignored_dst_entries : set[_Relpath]          = field(default_factory=set)
+	ignored_src_entries : OrderedSet[_Relpath]   = field(default_factory=OrderedSet)
+	ignored_dst_entries : OrderedSet[_Relpath]   = field(default_factory=OrderedSet)
 
 	def update(self, other: "_Diff"):
 		self.src_file_metadata.update(other.src_file_metadata)
@@ -358,23 +359,18 @@ class _Diff:
 					del self.file_matches[rename_from]
 			except KeyError:
 				pass
-			try:
-				if is_dir:
-					del self.dst_only_dirs[rename_from]
-				else:
-					del self.dst_only_files[rename_from]
-			except KeyError:
-				pass
+
+			if is_dir:
+				self.dst_only_dirs.discard(rename_from)
+			else:
+				self.dst_only_files.discard(rename_from)
 
 		for rename_to in created_by_rename:
 			is_dir = type(rename_to) == _Dir
-			try:
-				if is_dir:
-					del self.src_only_dirs[rename_to]
-				else:
-					del self.src_only_files[rename_to]
-			except KeyError:
-				pass
+			if is_dir:
+				self.src_only_dirs.discard(rename_to)
+			else:
+				self.src_only_files.discard(rename_to)
 
 	def get_rename_pairs(self, src_dir_hash = None, dst_dir_hash = None):
 		'''Convert rename map to a list of 'from', 'to' pairs, adding temp files where needed.'''
@@ -704,16 +700,16 @@ class _DualWalk:
 		src_parent, src_dirs, src_files, src_dir_size, src_file_metadata, _ = src_list
 		dst_parent, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, _ = dst_list
 
-		src_only_dirs : dict[_Dir, None]   = {} # using a dict will keep order of keys, make it easy to remove some later
-		dst_only_dirs : dict[_Dir, None]   = {}
-		src_only_files: dict[_File, None]  = {}
-		dst_only_files: dict[_File, None]  = {}
+		src_only_dirs : OrderedSet[_Dir]   = OrderedSet()
+		dst_only_dirs : OrderedSet[_Dir]   = OrderedSet()
+		src_only_files: OrderedSet[_File]  = OrderedSet()
+		dst_only_files: OrderedSet[_File]  = OrderedSet()
 		dir_matches   : dict[_Dir, _Dir]   = {}
 		file_matches  : dict[_File, _File] = {}
 		# ignore entries that are ambiguous or in conflict with another entry
 		# ignored entries won't be considered as rename candidates
-		ignored_src_entries: set[_Relpath] = set()
-		ignored_dst_entries: set[_Relpath] = set() # dst entries that are only matched with ignored entries
+		ignored_src_entries: OrderedSet[_Relpath] = OrderedSet()
+		ignored_dst_entries: OrderedSet[_Relpath] = OrderedSet() # dst entries that are only matched with ignored entries
 
 
 		#if dst_parent is None:
@@ -821,20 +817,20 @@ class _DualWalk:
 				elif type(final_match) != _Dir and type(dst_entry) == _Dir:
 					assert isinstance(final_match, _File)
 					assert type(dst_entry) == _Dir
-					src_only_files[final_match] = None
-					dst_only_dirs[dst_entry] = None
+					src_only_files.add(final_match)
+					dst_only_dirs.add(dst_entry)
 				else:
 					assert type(final_match) == _Dir
 					assert isinstance(dst_entry, _File)
-					src_only_dirs[final_match] = None
-					dst_only_files[dst_entry] = None
+					src_only_dirs.add(final_match)
+					dst_only_files.add(dst_entry)
 
 			elif not do_reject_dst:
 				if type(dst_entry) == _Dir:
-					dst_only_dirs[dst_entry] = None
+					dst_only_dirs.add(dst_entry)
 				else:
 					assert isinstance(dst_entry, _File)
-					dst_only_files[dst_entry] = None
+					dst_only_files.add(dst_entry)
 
 		for src_normalized, matches in in_src_only.items():
 			src_entry = src_normalized.unwrapped
@@ -849,10 +845,10 @@ class _DualWalk:
 			else:
 				m = matches[0].unwrapped
 				if type(src_entry) == _Dir:
-					src_only_dirs[src_entry] = None
+					src_only_dirs.add(src_entry)
 				else:
 					assert isinstance(src_entry, _File)
-					src_only_files[src_entry] = None
+					src_only_files.add(src_entry)
 
 		diff = _Diff(
 			self.config,

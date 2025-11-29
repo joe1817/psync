@@ -62,6 +62,7 @@ class _ArgParser:
 
 	parser.add_argument("--debug", action="store_true", default=None, help="Shorthand for --print-level DEBUG and --log-level DEBUG.")
 
+	parser.add_argument("--title", metavar="title", nargs="+", type=str, default=None, help="A strng to be printed in the header.")
 	parser.add_argument("-nh", "--no-header", action="store_true", default=None, help="Skip logging header information.")
 	parser.add_argument("-nf", "--no-footer", action="store_true", default=None, help="Skip logging footer information.")
 	parser.add_argument("-nhf", "--no-header-or-footer", action="store_true", default=None, help="Skip logging header and footer information.")
@@ -100,6 +101,9 @@ class _ArgParser:
 			parsed_args.filter = filter
 		del parsed_args.ignore_hidden
 		del parsed_args.ignore_case
+
+		if isinstance(parsed_args.title, list):
+			parsed_args.title = " ".join(parsed_args.title)
 
 		parsed_args.no_header = parsed_args.no_header or parsed_args.no_header_or_footer
 		parsed_args.no_footer = parsed_args.no_footer or parsed_args.no_header_or_footer

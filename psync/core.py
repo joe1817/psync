@@ -176,6 +176,7 @@ class Sync:
 			print_level        (int) : Log level for printing to console. (Default to `logging.INFO`.)
 			debug         (bool|int) : Sets console and file debugging levels to DEBUG. If an integer, the masks Sync.RAISE_UNKNOWN_ERRORS and Sync.RAISE_FS_ERRORS can be used to halt on their respective error types. (Defaults to `False`.)
 
+			title              (str) : A strng to be printed in the header.
 			no_header         (bool) : Whether to skip logging header information. (Defaults to `False`.)
 			no_footer         (bool) : Whether to skip logging footer information. (Defaults to `False`.)
 
@@ -220,6 +221,7 @@ class Sync:
 		self._file_level         : int = logging.INFO # log file level
 		self._print_level        : int = logging.INFO
 		self._debug              : bool|int = False
+		self._title              : str|None = None
 
 		# no properties for these
 		self._handler_file       : logging.FileHandler|None = None
@@ -712,6 +714,16 @@ class Sync:
 			raise TypeError(f"Bad type for arg 'debug' (expected bool|int): {val}")
 		self._debug = val
 
+	@property
+	def title(self) -> str|None:
+		return self._title
+
+	@title.setter
+	def title(self, val:str) -> None:
+		if not isinstance(val, str|None):
+			raise TypeError(f"Bad type for arg 'title' (expected str|None): {val}")
+		self._title = val
+
 	# -------------------------------------------------------------------------
 	# Derived properties
 
@@ -856,6 +868,8 @@ class SyncRunner:
 			config.logger.debug("")
 
 			width = max(len(str(config.src)), len(str(config.dst)), 7) + 3
+			if config.title:
+				config.logger.info(config.title, extra=HEADER)
 			config.logger.info("   " + str(config.src), extra=HEADER)
 			config.logger.info("-> " + str(config.dst), extra=HEADER)
 			config.logger.info("-" * width, extra=HEADER)

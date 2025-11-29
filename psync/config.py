@@ -38,6 +38,7 @@ class _SyncConfig:
 
 	log_file           : _AbstractPath|None
 	debug              : bool|int
+	title              : str|None
 
 	# derived
 	src_sep            : str

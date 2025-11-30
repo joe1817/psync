@@ -24,6 +24,8 @@ def _exc_summary(e) -> str:
 	return msg
 
 class _RecordTag(Enum):
+	'''Tags for `logging.Record`s to allow filtering based on tag.'''
+
 	HEADER = 1
 	FOOTER = 2
 	SYNC_OP = 3
@@ -33,16 +35,19 @@ class _RecordTag(Enum):
 
 class _DebugInfoFilter(logging.Filter):
 	'''Logging filter that only allows DEBUG and INFO records to pass.'''
+
 	def filter(self, record):
 		return logging.DEBUG <= record.levelno <= logging.INFO
 
 class _NonEmptyFilter(logging.Filter):
 	'''Logging filter that only allows non-empty messages.'''
+
 	def filter(self, record):
 		return bool(str(record.msg).strip())
 
 class _TagFilter(logging.Filter):
 	'''Logging filter that does not allow messages with certain tags supplied in `extras`.'''
+
 	def __init__(self, enabled:bool = True):
 		self.enabled : bool = enabled
 		self.hidden  : dict[_RecordTag, bool] = {}
@@ -56,6 +61,8 @@ class _TagFilter(logging.Filter):
 		return not any(self.hidden[k] and bool(getattr(record, k.name, False)) for k in self.hidden)
 
 class _ConsoleFormatter(logging.Formatter):
+	'''Logging formatter for records printed to the console.'''
+
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 	BASE_FORMAT = "%(message)s"
 
@@ -72,6 +79,8 @@ class _ConsoleFormatter(logging.Formatter):
 		return msg
 
 class _LogFileFormatter(logging.Formatter):
+	'''Logging formatter for records saved to a log file.'''
+
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 	BASE_FORMAT = "%(message)s"
 
@@ -95,6 +104,8 @@ class _LogFileFormatter(logging.Formatter):
 logger = logging.getLogger("psync")
 
 def setup_logger():
+	'''Set up the "psync" package logger.'''
+
 	if not logger.handlers:
 		logger.setLevel(logging.INFO)
 		handler_stdout = logging.StreamHandler(sys.stdout)

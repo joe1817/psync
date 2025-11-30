@@ -20,6 +20,7 @@ except ImportError:
 	pass
 
 class _LocalWatcher(FileSystemEventHandler):
+	'''Watches a directory by handling filesystem change events by calling the appropriate sync command.'''
 
 	def __init__(self, sync: "Sync"):
 		if "Observer" not in globals():

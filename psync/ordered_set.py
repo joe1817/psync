@@ -12,10 +12,7 @@ except ImportError:
 	T = TypeVar("T")
 
 	class OrderedSet(MutableSet[T], Generic[T]): # type: ignore [no-redef]
-		'''
-		A compatibility layer for OrderedSet that uses the keys of a standard
-		Python dict for ordered, unique storage (requires Python 3.7+).
-		'''
+		'''A compatibility layer for OrderedSet that uses the keys of a standard Python dict for ordered, unique storage (requires Python 3.7+).'''
 
 		def __init__(self, _set: AbstractSet[T]|None = None) -> None:
 			self._items: dict[T, None] = {}

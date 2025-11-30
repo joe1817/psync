@@ -113,6 +113,8 @@ class _Dir(_Relpath):
 	pass
 
 class _Normalized:
+	'''Wrapper for `_Relpath` to base its hash calculation on its norm property.'''
+
 	def __init__(self, relpath: _Relpath):
 		self._wrapped: _Relpath = relpath
 
@@ -140,6 +142,8 @@ _DirList = namedtuple("_DirList", [
 
 @dataclass(frozen=True)
 class _Diff:
+	'''A diff between two directories.'''
+
 	config              : _SyncConfig
 	src_parent          : _Dir|None              = None
 	dst_parent          : _Dir|None              = None
@@ -155,6 +159,8 @@ class _Diff:
 	ignored_dst_entries : OrderedSet[_Relpath]   = field(default_factory=OrderedSet)
 
 	def update(self, other: "_Diff"):
+		'''Combine two diffs.'''
+
 		self.src_file_metadata.update(other.src_file_metadata)
 		self.dst_file_metadata.update(other.dst_file_metadata)
 		self.src_only_dirs.update(other.src_only_dirs)
@@ -396,7 +402,18 @@ class _Diff:
 					yield a, b
 
 class _DualWalk:
+	'''Represents a "dual walk" search algorithm that walks two directories and yields a `_Diff` for each matched sub-directory pair.'''
+
 	def __init__(self, config: _SyncConfig, *, bottom_up_lone_dst: bool=True, get_dir_hashes: bool=False):
+		'''
+		Initialize the `_DualWalk` object.
+
+		Args
+			config      (_SyncConfig): Sync settings object
+			bottom_up_lone_dst (bool): Switch to a bottom-up mode when traversing directories in `config.dst` that don't have a match in `config.src`.
+			get_dir_hashes     (bool): Calculate hashes for directories, which can be used for finding renames.
+
+		'''
 		self.config = config
 		self.bottom_up_lone_dst = bottom_up_lone_dst
 		self.get_dir_hashes = get_dir_hashes
@@ -411,6 +428,12 @@ class _DualWalk:
 		yield from self.dual_walk(self.config.src, self.config.dst)
 
 	def dual_walk(self, src_path: _AbstractPath|None, dst_path: _AbstractPath|None, *, _bottom_up: bool=False) -> Iterator[_Diff]:
+		'''
+		Perform the dual walk.
+
+		Returns
+			an Iterator of `_Diff`s.'''
+
 		# don't follow circular symlinks
 		if self.config.follow_symlinks:
 			if src_path is not None:
@@ -858,7 +881,7 @@ class _DualWalk:
 		return diff
 
 def _last_bytes(file:_AbstractPath, n:int = 1024) -> bytes:
-	'''Reads and returns the last `n` bytes of a file.'''
+	'''Reads and returns the last `n` bytes of a file. Used in conjunction with a metadata comparison to quickly check that two files are likely the same.'''
 
 	file_size = file.stat().st_size
 	if file_size is None:

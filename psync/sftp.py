@@ -26,7 +26,7 @@ from .log import logger
 from .errors import MetadataUpdateError
 
 class RemotePath:
-	'''A class that mimics a Path object while operating on a remote SFTP server using a paramiko SFTPClient object.'''
+	'''A class that mimics a Path object while operating on the filesystem of a remote SFTP server.'''
 
 	# netloc keys
 	ssh_connections  : dict[str, paramiko.client.SSHClient] = {}
@@ -133,7 +133,7 @@ class RemotePath:
 
 	@classmethod
 	def shutdown(cls, hostname: str) -> None:
-		'''Sends shutdown (power off) signal to server.'''
+		'''Command server to shut down (power off).'''
 
 		netloc = cls.get_netlocs_from_hostname(hostname)
 		try:
@@ -252,6 +252,8 @@ class RemotePath:
 
 	@classmethod
 	def readlink(cls, src:"RemotePath") -> str|None:
+		'''Read the target of a `RemotePath` symlink.'''
+
 		connection = cls.sftp_connections[src.netloc]
 		return connection.readlink(str(src))
 
@@ -267,6 +269,8 @@ class RemotePath:
 
 	@classmethod
 	def _utime(cls, dst:"RemotePath", *, st, follow_symlinks:bool) -> None:
+		'''Update the mtime of a `RemotePath` file from the mtime of a stat object.'''
+
 		if st.st_atime is None or st.st_mtime is None:
 			raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 
@@ -286,6 +290,8 @@ class RemotePath:
 
 	@classmethod
 	def walk(cls, top:"RemotePath", followlinks:bool = False) -> Iterator[tuple["RemotePath", list["RemotePath"], list["RemotePath"]]]:
+		'''Walk a `RemotePath` directory.'''
+
 		stack        : list["RemotePath"] = [top]
 		visited_dirs : set[str]  = set()
 
@@ -327,6 +333,8 @@ class RemotePath:
 	connection:paramiko.sftp_client.SFTPClient
 
 	def __init__(self, path:str, netloc:str):
+		'''Initialize a `RemotePath` object.'''
+
 		path = str(path)
 		if path != "/":
 			path = path.rstrip("/")
@@ -561,6 +569,7 @@ class RemotePath:
 
 	def replace(self, target:"RemotePath") -> "RemotePath":
 		'''Alias for `rename()`.'''
+
 		return self.rename(target)
 
 	def samefile(self, target:"RemotePath") -> bool:

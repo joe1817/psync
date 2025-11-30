@@ -16,7 +16,7 @@ T_AbstractPath = TypeVar("T_AbstractPath", bound="_AbstractPath")
 
 @runtime_checkable
 class _AbstractPath(Protocol):
-	'''Protocol class representing the methods a Path-like object needs to do a sync.'''
+	'''Protocol class representing the methods a Path-like object needs to do a sync operation.'''
 	
 	@property
 	def name(self: T_AbstractPath) -> str:

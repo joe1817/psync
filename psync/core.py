@@ -24,7 +24,7 @@ from .errors import StateError, UnsupportedOperationError, FilesystemErrorLimitE
 from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
 class Results:
-	'''Various statistics and other information returned by `sync()`.'''
+	'''Various statistics and other information returned by `SyncRunner.run()`.'''
 
 	Counts = namedtuple("Counts", ["success", "failure"])
 
@@ -97,7 +97,7 @@ class Results:
 
 class Sync:
 	'''
-	`Sync` performs the file sync operation in accordance to several optional arguments, including those related to filtering, matching, deleting, and logging.
+	Collects and validates arguments for a sync operation, including those related to filtering, matching, deleting, and logging..
 
 	A default sync operation entails copying new and updated files from `src` to `dst`, recursively and maintaining directory structure. Files in `dst` with the same relative paths as those in `src` are assumed to be related. Files are not deleted by default. Files in `dst` may be renamed to match those in `src`. Candidates for rename are discovered by searching for files with an identical metadata signature, consisting of file size and modification time. These candidates must be above a minimum size threshold (`rename_threshold`) and have an unambiguously unique metadata signature within their respective root directories.
 
@@ -141,7 +141,7 @@ class Sync:
 
 	def __init__(self, src:_AbstractPath|str, dst:_AbstractPath|str, **kwargs):
 		'''
-		Collects and validates arguments for a sync operation.
+		Initialize a `Sync` object.
 
 		Args
 			src    (str or PathLike) : The path of the root directory to copy files from. Can be a symlink to a directory.
@@ -179,9 +179,6 @@ class Sync:
 			title              (str) : A strng to be printed in the header.
 			no_header         (bool) : Whether to skip logging header information. (Defaults to `False`.)
 			no_footer         (bool) : Whether to skip logging footer information. (Defaults to `False`.)
-
-		Returns
-			A `Results` object containing various statistics.
 		'''
 
 		self._state = Sync._SyncState.INVALID
@@ -239,12 +236,16 @@ class Sync:
 	# Instance methods
 
 	def setup_trash(self, timestamp: str) -> None:
+		'''Set up a trash directory if it is set to 'auto'.'''
+
 		if self.trash is Sync._AUTO_TRASH_DIR:
 			trash_name = f"Trash.{timestamp}"
 			trash_path = self.dst.parent / trash_name
 			self.trash = trash_path
 
 	def setup_logging(self, timestamp: str) -> None:
+		'''Set up the logger attached to this `Sync` object.'''
+
 		logger_name = f"psync.{timestamp}"
 		assert logger_name not in logging.Logger.manager.loggerDict
 
@@ -299,16 +300,26 @@ class Sync:
 			self.logger.addHandler(handler_file)
 
 	def run(self) -> Results:
-		'''Runs the sync operation. `run()` does not raise errors. If an error occurs, it will be available in the returned `Results` object.'''
+		'''
+		Run this sync operation. This method does not raise errors. If an error occurs, it will be available in the returned `Results` object.
+
+		Returns
+			A `Results` object containing various statistics.
+		'''
+
 		return SyncRunner.run(self)
 
 	def watch(self) -> None:
+		'''Start watching the `src` directory for changes.'''
+
 		if isinstance(self.src, RemotePath):
 			raise UnsupportedOperationError("Can only watch local directories.")
 		else:
 			_LocalWatcher(self).watch()
 
 	def close_file_handler(self) -> None:
+		'''Close the logfile handler.'''
+
 		if self._handler_file:
 			assert isinstance(self.log_file, Path)
 			self.logger.removeHandler(self._handler_file)
@@ -825,9 +836,12 @@ class Sync:
 				pass
 
 class SyncRunner:
+	'''`SyncRunner` performs the file sync operation in accordance to the options collected by a `Sync` object.'''
 
 	@classmethod
 	def shutdown_local(cls) -> None:
+		'''Shuts down (powers off) the local machine.'''
+
 		platform = sys.platform
 		if platform.startswith("win"):
 			command = "shutdown /s /f /t 0"
@@ -843,6 +857,8 @@ class SyncRunner:
 
 	@classmethod
 	def get_config(cls, sync: Sync) -> _SyncConfig:
+		'''Convert a `Sync` object  to a `_SyncConfig` object.'''
+
 		names = {f.name for f in fields(_SyncConfig)}
 		options = {name: getattr(sync, name) for name in names}
 		config = _SyncConfig(**options)
@@ -850,6 +866,13 @@ class SyncRunner:
 
 	@classmethod
 	def run(cls, sync: Sync) -> Results:
+		'''
+		Run a sync operation. This method does not raise errors. If an error occurs, it will be available in the returned `Results` object.
+
+		Returns
+			A `Results` object containing various statistics.
+		'''
+
 		if sync._state != Sync._SyncState.READY:
 			raise StateError("Sync object state is not READY.")
 

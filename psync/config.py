@@ -10,8 +10,9 @@ from .types import _AbstractPath
 
 @dataclass(frozen=True)
 class _SyncConfig:
-	# collected in Sync constructor
-	src                : _AbstractPath # using the protocol, not the typevar, allows each src, dst, etc. to be different classes
+	'''Pass the essential properties from `Sync` to a read-only data structure.'''
+
+	src                : _AbstractPath
 	dst                : _AbstractPath
 	filter             : Filter
 	translate_symlinks : bool

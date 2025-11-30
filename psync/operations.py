@@ -20,7 +20,19 @@ from .types import _AbstractPath
 from .errors import MetadataUpdateError, BrokenSymlinkError, IncompatiblePathError, NewerInDstError, UnsupportedOperationError
 from .log import _exc_summary
 
-def _get_operations(config) -> Iterator["Operation"]:
+def _get_operations(config: _SyncConfig) -> Iterator["Operation"]:
+	'''
+	Get all the `Operation`s necessary to complete the sync operation.
+
+	Args
+		config (_SyncConfig): Sync settings object
+
+	Returns
+		an Iterator of `Operation`s.
+	'''
+
+	# In general, operations are yielded in a particular order: renames, deletes, updates, and creates.
+
 	factory = _OperationFactory(config)
 
 	a: _Relpath
@@ -145,6 +157,8 @@ class Operation:
 	byte_diff : int = 0
 
 	def perform(self):
+		'''Perform the filesystem operation associated with this object.'''
+
 		raise NotImplementedError()
 
 	def depends_on(self, op:"Operation"):
@@ -185,6 +199,8 @@ class Operation:
 
 	@property
 	def summary(self):
+		'''A string summary that will be logged when the `Operation` is performed.'''
+
 		raise NotImplementedError()
 
 	def __str__(self):
@@ -443,7 +459,7 @@ class CreateDirOperation(Operation): # Empty dirs only
 		return f"+ {self.config.dst_name}{self.dst}{self.config.dst_sep}"
 
 class _OperationFactory:
-	'''Determines which Operations to yield, in accordance with config settings and the _Relpath's type.'''
+	'''Determines which `Operation`s to yield, in accordance `_SyncConfig` settings and the type of the `_Relpath`s given as arguments.'''
 
 	def __init__(self, config: _SyncConfig):
 		self.config = config
@@ -600,6 +616,8 @@ def _move(src:_AbstractPath, dst:_AbstractPath, *, exist_ok:bool = False) -> Non
 	_replace(src, dst)
 
 def _create_symlink(dst:_AbstractPath, *, target:str, st, exist_ok:bool = True) -> None:
+	'''Create a symlink pointing to `target`. Modification time is retrieved from the stat object `st`.'''
+
 	if dst.exists():
 		if not exist_ok:
 			raise FileExistsError(17, "Cannot create symlink, dst exists", str(dst))

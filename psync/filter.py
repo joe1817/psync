@@ -17,12 +17,16 @@ from .errors import StateError
 from .log import logger
 
 class Filter:
-	'''Abstract base class for all file filtering objects used by `Sync`.'''
+	'''Abstract base class for all file filtering objects supplied to `Sync`.'''
 
 	def __init__(self, default:bool = False):
+		'''Initialize a `Filter` object.'''
+
 		self.default = default
 
 	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
+		'''(Abstract method) Filter path.'''
+
 		raise NotImplementedError()
 
 class PathFilter(Filter):
@@ -353,7 +357,7 @@ class PathFilter(Filter):
 					yield segment
 
 	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
-		'''Compare the file path against the filter string.'''
+		'''Filter paths by comparing them against the filter string.'''
 
 		for segment in self._segments:
 			if segment.matcher.match(relpath):
@@ -379,6 +383,8 @@ class AllFilter(Filter):
 	'''Filter that allows or rejects based on child Filters.'''
 
 	def __init__(self, *filters:Filter):
+		'''Initialize an `AllFilter` object.'''
+
 		super().__init__()
 
 		if not filters:
@@ -386,6 +392,8 @@ class AllFilter(Filter):
 		self.filters = filters
 
 	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
+		'''Filter paths by accepting only those that pass all constiuent `Filters`.'''
+
 		if all(f.filter(relpath, root=root) for f in self.filters):
 			return True
 		else:

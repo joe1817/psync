@@ -8,6 +8,7 @@ import time
 import tempfile
 import posixpath
 import socket
+from getpass import getpass
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 from typing import Iterator, Union
@@ -27,6 +28,12 @@ from .errors import MetadataUpdateError
 
 class RemotePath:
 	'''A class that mimics a Path object while operating on the filesystem of a remote SFTP server.'''
+
+	# environment variables
+	HOSTNAME = "HOSTNAME"
+	PORT     = "PORT"
+	USERNAME = "USERNAME"
+	PASSWORD = "PASSWORD"
 
 	# netloc keys
 	ssh_connections  : dict[str, paramiko.client.SSHClient] = {}
@@ -48,7 +55,10 @@ class RemotePath:
 			raise ValueError("Malformed URI")
 
 		if parsed.netloc not in cls.ssh_connections:
-			password = parsed.password or input(f"Password for {parsed.netloc}: ")
+			hostname = parsed.hostname or os.environ.get(cls.HOSTNAME)
+			port     = parsed.port or os.environ.get(cls.PORT) or 22
+			username = parsed.username or os.environ.get(cls.USERNAME)
+			password = parsed.password or os.environ.get(cls.PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
 
 			ssh = paramiko.SSHClient()
 			ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -56,9 +66,9 @@ class RemotePath:
 			try:
 				logger.info(f"Connecting to {parsed.username}@{parsed.hostname}…")
 				ssh.connect(
-					parsed.hostname,
-					port     = parsed.port or 22,
-					username = parsed.username,
+					hostname,
+					port     = port,
+					username = username,
 					password = password,
 					timeout  = timeout,
 				)
@@ -141,7 +151,8 @@ class RemotePath:
 			if cls.os_name == "nt":
 				stdin, stdout, stderr = ssh.exec_command("shutdown /s /f /t 0")
 			else:
-				stdin, stdout, stderr = ssh.exec_command("shutdown -h now")
+				password = os.environ.get(PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
+				stdin, stdout, stderr = ssh.exec_command(f"echo {password} | sudo -S shutdown -h now")
 			error = stderr.read().decode().strip()
 			if error:
 				logger.error(f"Could not shut down system: {hostname}")

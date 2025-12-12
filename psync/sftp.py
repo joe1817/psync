@@ -98,9 +98,14 @@ class RemotePath:
 					stdin, stdout, stderr = ssh.exec_command("echo $HOME")
 				else:
 					stdin, stdout, stderr = ssh.exec_command(f"getent passwd {user} | cut -d: -f6")
-				remote_home_dir = stdout.read().decode().strip()
-			except paramiko.ssh_exception.SSHException:
-				raise ConnectionError(f"Unable to expand ~ to user's home directory.")
+				stdout_output = stdout.read() # drain buffers
+				stderr_output = stderr.read()
+				exit_status = stdout.channel.recv_exit_status()
+				if exit_status:
+					raise paramiko.ssh_exception.SSHException()
+				remote_home_dir = stdout_output.decode("utf-8").strip()
+			except paramiko.ssh_exception.SSHException as e:
+				raise ConnectionError(f"Unable to expand ~ to user's home directory.") from e
 			if not remote_home_dir:
 				raise ConnectionError(f"User not found.")
 			else:
@@ -130,8 +135,10 @@ class RemotePath:
 			netloc = cls.get_netlocs_from_hostname(hostname)
 			ssh = cls.ssh_connections[next(netloc)]
 			stdin, stdout, stderr = ssh.exec_command("uname -a")
-			error = stderr.read().decode().strip()
-			os_name = "nt" if bool(error) else "posix"
+			stdout_output = stdout.read() # drain buffers
+			stderr_output = stderr.read()
+			exit_status = stdout.channel.recv_exit_status()
+			os_name = "nt" if exit_status else "posix"
 			cls.os_names[hostname] = os_name
 		return os_name
 
@@ -151,12 +158,15 @@ class RemotePath:
 			if cls.os_name == "nt":
 				stdin, stdout, stderr = ssh.exec_command("shutdown /s /f /t 0")
 			else:
-				password = os.environ.get(PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
+				password = os.environ.get(cls.PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
 				stdin, stdout, stderr = ssh.exec_command(f"echo {password} | sudo -S shutdown -h now")
-			error = stderr.read().decode().strip()
-			if error:
+			stdout_output = stdout.read() # drain buffers
+			stderr_output = stderr.read()
+			exit_status = stdout.channel.recv_exit_status()
+			if exit_status:
+				logger.debug(f"{exit_status=}")
 				logger.error(f"Could not shut down system: {hostname}")
-				logger.debug(error)
+				logger.debug(stderr_output.decode("utf-8").strip())
 		except (EOFError, paramiko.SSHException):
             # shutting down should close the server connection, so this exception means success
 			# forget all connections to the shut down host
@@ -190,13 +200,16 @@ class RemotePath:
 		'''Copy a file where at least one of `src` and `dst` is a `RemotePath` object.'''
 
 		if isinstance(src, RemotePath) and isinstance(dst, RemotePath):
-			if src.netloc == dst.netloc:
+			if src.netloc == dst.netloc and cls.os_names[src.hostname] == "posix":
 				try:
 					ssh = cls.ssh_connections[src.netloc]
+					# TODO implement for Windows too
 					stdin, stdout, stderr = ssh.exec_command(f"cp {'' if follow_symlinks else '-P'} {str(src)} {str(dst)}")
-					err = stderr.read().decode().strip()
-					if err:
-						raise OSError(1, err, str(src))
+					stdout_output = stdout.read() # drain buffers
+					stderr_output = stderr.read()
+					exit_status = stdout.channel.recv_exit_status()
+					if exit_status:
+						raise OSError(1, stderr_output.decode().strip(), str(src))
 				except paramiko.ssh_exception.SSHException:
 					raise OSError(1, "Connection error", str(src))
 			else:
@@ -292,11 +305,13 @@ class RemotePath:
 			mtime_epoch = int(st.st_mtime)
 			new_mtime = time.strftime("%Y%m%d%H%M.%S", time.localtime(mtime_epoch))
 			# touch -h changes the link times, not the target
-			command = f"touch -h -m -t {new_mtime} {str(dst)}"
+			command = f"touch -h -m -t {new_mtime} {str(dst)}" # TODO no simple Windows equivalent (of course)
 			ssh = cls.ssh_connections[dst.netloc]
 			stdin, stdout, stderr = ssh.exec_command(command)
-			error = stderr.read().decode().strip()
-			if error:
+			stdout_output = stdout.read() # drain buffers
+			stderr_output = stderr.read()
+			exit_status = stdout.channel.recv_exit_status()
+			if exit_status:
 				raise MetadataUpdateError(f"Could not update time metadata: {dst}")
 
 	@classmethod

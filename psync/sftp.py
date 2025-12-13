@@ -155,25 +155,30 @@ class RemotePath:
 		netloc = cls.get_netlocs_from_hostname(hostname)
 		try:
 			ssh = cls.ssh_connections[next(netloc)]
+			# Wait 1 minute so exit status can be read.
 			if cls.os_name == "nt":
-				stdin, stdout, stderr = ssh.exec_command("shutdown /s /f /t 0")
+				stdin, stdout, stderr = ssh.exec_command("shutdown /s /t 60")
 			else:
 				password = os.environ.get(cls.PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
-				stdin, stdout, stderr = ssh.exec_command(f"echo {password} | sudo -S shutdown -h now")
+				# Sync to clear disk cache.
+				command = f"echo {password} | sudo -S sync && echo {password} | sudo -S shutdown -h +1"
+				stdin, stdout, stderr = ssh.exec_command(command)
 			stdout_output = stdout.read() # drain buffers
 			stderr_output = stderr.read()
 			exit_status = stdout.channel.recv_exit_status()
 			if exit_status:
-				logger.debug(f"{exit_status=}")
 				logger.error(f"Could not shut down system: {hostname}")
+				logger.debug(f"{exit_status=}")
 				logger.debug(stderr_output.decode("utf-8").strip())
+			else:
+				logger.info(f"Shutting down system in 1 minute: {hostname}")
+				# Forget all connections to the shut down host.
+				for n in netloc:
+					del cls.sftp_connections[n]
+					del cls.ssh_connections[n]
+
 		except (EOFError, paramiko.SSHException):
-            # shutting down should close the server connection, so this exception means success
-			# forget all connections to the shut down host
-			logger.info(f"Shut down system: {hostname}")
-			for n in netloc:
-				del cls.sftp_connections[n]
-				del cls.ssh_connections[n]
+			logger.error(f"Could not shut down system: {hostname}")
 		except StopIteration:
 			# assume it was already shut down
 			pass

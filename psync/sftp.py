@@ -382,6 +382,8 @@ class RemotePath:
 		return type(self)(new_path_obj, self.netloc)
 
 	def __truediv__(self, other:str) -> "RemotePath":
+		if not isinstance(other, str):
+			return NotImplemented
 		new_path_obj = self.path + "/" + str(other)
 		return type(self)(new_path_obj, self.netloc)
 

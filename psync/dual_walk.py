@@ -32,27 +32,29 @@ class _Relpath:
 	relpath    : str
 	sep        : str
 	dst_sys    : str
+	real       : tuple[str] = ("",)
 	norm       : tuple[str] = ("",)
-	name       : str = ""
 	_real_hash : int = 0
 	_norm_hash : int = 0
 
 	def __post_init__(self):
+		object.__setattr__(self, "real", tuple(self.relpath.split(self.sep)))
 		if self.dst_sys == "nt":
 			if (self.sep == "/" and "\\" in self.relpath) or ntpath.isreserved(self.relpath):
 				raise IncompatiblePathError("Incompatible path for this system", str(self.relpath))
-			parts = self.relpath.split(self.sep)
-			object.__setattr__(self, "norm", tuple(p.lower() for p in parts))
-			object.__setattr__(self, "name", parts[-1])
+			object.__setattr__(self, "norm", tuple(p.lower() for p in self.real))
 		else:
-			object.__setattr__(self, "norm", tuple(self.relpath.split(self.sep)))
-			object.__setattr__(self, "name", self.norm[-1])
+			object.__setattr__(self, "norm", self.real)
 
-		object.__setattr__(self, "_real_hash", hash(self.relpath))
+		object.__setattr__(self, "_real_hash", hash(self.real))
 		object.__setattr__(self, "_norm_hash",  hash(self.norm))
 
 		assert self.name != ""
 		assert ".." not in self.norm
+
+	@property
+	def name(self):
+		return self.real[-1]
 
 	@property
 	def normed_name(self):
@@ -62,10 +64,10 @@ class _Relpath:
 	def parent(self):
 		if len(self.norm) == 1:
 			return None
-		return _Dir(self.sep.join(self.relpath.split(self.sep)[:-1]), self.sep, self.dst_sys)
+		return _Dir(self.sep.join(self.real[:-1]), self.sep, self.dst_sys)
 
 	def __eq__(self, other):
-		return self.relpath == other.relpath
+		return self.real == other.real
 
 	# Comparing by relpath would make sense, but _Relpaths are only ever sorted by their norms.
 	# So, keep this commented-out so it doesn't get used by mistake.
@@ -76,22 +78,22 @@ class _Relpath:
 		return self._real_hash
 
 	def __rtruediv__(self, other:_AbstractPath):
-		return other.joinpath(*self.relpath.split(self.sep))
+		return other.joinpath(*self.real)
 
 	def __add__(self, other):
 		return type(self)(self.relpath + other, self.sep, self.dst_sys)
 
 	def __bool__(self):
-		return bool(self.relpath)
+		return bool(self.real)
 
 	def __contains__(self, val):
-		return val in self.relpath
+		return val in self.real
 
-	def __str__(self):
-		return self.relpath
+#	def __str__(self):
+#		return self.relpath
 
-	def __repr__(self):
-		return self.relpath
+#	def __repr__(self):
+#		return f"Relpath({self.real})"
 
 	def is_relative_to(self, other):
 		if other.relpath == ".":

@@ -219,7 +219,7 @@ class RenameFileOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"R {self.config.dst_name}{self.dst} -> {self.config.dst_name}{self.target}"
+		return f"R {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)} -> {self.config.dst_name}{self.config.dst_sep.join(self.target.real)}"
 
 @dataclass(frozen=True)
 class RenameDirOperation(Operation):
@@ -234,7 +234,7 @@ class RenameDirOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"R {self.config.dst_name}{self.dst}{self.config.dst_sep} -> {self.config.dst_name}{self.target}{self.config.dst_sep}"
+		return f"R {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}{self.config.dst_sep} -> {self.config.dst_name}{self.config.dst_sep.join(self.target.real)}{self.config.dst_sep}"
 
 @dataclass(frozen=True)
 class DeleteFileOperation(Operation):
@@ -255,7 +255,7 @@ class DeleteFileOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"- {self.config.dst_name}{self.dst}"
+		return f"- {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}"
 
 @dataclass(frozen=True)
 class DeleteDirOperation(Operation): # Empty dirs only
@@ -276,7 +276,7 @@ class DeleteDirOperation(Operation): # Empty dirs only
 
 	@property
 	def summary(self):
-		return f"- {self.config.dst_name}{self.dst}{self.config.dst_sep}"
+		return f"- {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}{self.config.dst_sep}"
 
 @dataclass(frozen=True)
 class TrashFileOperation(Operation):
@@ -299,7 +299,7 @@ class TrashFileOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"T {self.config.dst_name}{self.dst}"
+		return f"T {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}"
 
 @dataclass(frozen=True)
 class TrashDirOperation(Operation): # Empty dirs only
@@ -322,7 +322,7 @@ class TrashDirOperation(Operation): # Empty dirs only
 
 	@property
 	def summary(self):
-		return f"T {self.config.dst_name}{self.dst}{self.config.dst_sep}"
+		return f"T {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}{self.config.dst_sep}"
 
 @dataclass(frozen=True)
 class UpdateFileOperation(Operation):
@@ -336,7 +336,7 @@ class UpdateFileOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"U {self.config.dst_name}{self.dst}"
+		return f"U {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}"
 
 @dataclass(frozen=True)
 class CreateFileOperation(Operation):
@@ -350,7 +350,7 @@ class CreateFileOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"+ {self.config.dst_name}{self.dst}"
+		return f"+ {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}"
 
 @dataclass(frozen=True)
 class CreateSymlinkOperation(Operation):
@@ -443,7 +443,7 @@ class CreateSymlinkOperation(Operation):
 
 	@property
 	def summary(self):
-		return f"L {self.config.dst_name}{self.dst} -> {self.target}"
+		return f"L {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)} -> {self.target}"
 
 @dataclass(frozen=True)
 class CreateDirOperation(Operation): # Empty dirs only
@@ -456,7 +456,7 @@ class CreateDirOperation(Operation): # Empty dirs only
 
 	@property
 	def summary(self):
-		return f"+ {self.config.dst_name}{self.dst}{self.config.dst_sep}"
+		return f"+ {self.config.dst_name}{self.config.dst_sep.join(self.dst.real)}{self.config.dst_sep}"
 
 class _OperationFactory:
 	'''Determines which `Operation`s to yield, in accordance `_SyncConfig` settings and the type of the `_Relpath`s given as arguments.'''

@@ -21,21 +21,20 @@ class TestSFTP(unittest.TestCase):
 
 	@classmethod
 	def setUpClass(cls):
+		if os.getenv("TEST_REMOTE", None).lower() not in ["true", "t", "yes", "y", "1", "on"]:
+			raise unittest.SkipTest(f"Environment variable TEST_REMOTE is set to false. Skipping test.")
 		# read login info from config file
-		config = configparser.ConfigParser()
 		if not CONFIG_PATH.exists():
-			raise unittest.SkipTest(f"Configuration file not found at: {CONFIG_PATH}")
+			raise unittest.SkipTest(f"Configuration file not found at: {CONFIG_PATH}. Skipping test.")
+		config = configparser.ConfigParser()
 		config.read(CONFIG_PATH)
 		try:
-			cls.enabled = config.get("SERVER_INFO", "enabled").lower() in ["true", "t", "1", "yes", "y", "on"]
-			if not cls.enabled:
-				raise unittest.SkipTest(f"Testing over SFTP is disabled.")
-			cls.host = config.get("SERVER_INFO", "host")
-			cls.port = config.getint("SERVER_INFO", "port")
-			cls.username = config.get("SERVER_INFO", "username")
-			cls.password = os.getenv("SERVER_PASSWORD", None) or config.get("SERVER_INFO", "password")
+			cls.host     = os.getenv("HOSTNAME", None) or config.get("SERVER_INFO", "hostname")
+			cls.port     = os.getenv("PORT"    , None) or config.get("SERVER_INFO", "port")
+			cls.username = os.getenv("USERNAME", None) or config.get("SERVER_INFO", "username")
+			cls.password = os.getenv("PASSWORD", None) or config.get("SERVER_INFO", "password")
 		except (configparser.NoSectionError, configparser.NoOptionError) as e:
-			raise unittest.SkipTest(f"Configuration file is missing required section/option: {e}")
+			raise unittest.SkipTest(f"Configuration file is missing required section/option: {e}. Skipping test.")
 
 	@classmethod
 	def tearDownClass(cls):

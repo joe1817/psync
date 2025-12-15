@@ -51,14 +51,14 @@ class RemotePath:
 		if not url.startswith("ftp://") and not url.startswith("sftp://"):
 			url = "sftp://" + url
 		parsed = urlparse(url)
-		if not parsed.hostname or not parsed.username:
+		if parsed.hostname is None or parsed.username is None:
 			raise ValueError("Malformed URI")
 
 		if parsed.netloc not in cls.ssh_connections:
-			hostname = parsed.hostname or os.environ.get(cls.HOSTNAME)
-			port     = parsed.port or os.environ.get(cls.PORT) or 22
-			username = parsed.username or os.environ.get(cls.USERNAME)
-			password = parsed.password or os.environ.get(cls.PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
+			hostname = parsed.hostname or os.getenv(cls.HOSTNAME, "")
+			port     = parsed.port     or int(os.getenv(cls.PORT, 0)) or 22
+			username = parsed.username or os.getenv(cls.USERNAME)
+			password = parsed.password or os.getenv(cls.PASSWORD) or getpass(f"Password for {parsed.username}@{parsed.hostname}: ")
 
 			ssh = paramiko.SSHClient()
 			ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -74,10 +74,10 @@ class RemotePath:
 				)
 			except socket.gaierror as e:
 				raise ConnectionError("Invalid hostname.") from e
-			except TimeoutError as e:
-				raise ConnectionError("Host timeout.") from e
 			except paramiko.ssh_exception.AuthenticationException as e:
 				raise ConnectionError(str(e)) from e
+			except TimeoutError as e:
+				raise ConnectionError("Host timeout.") from e
 			except PermissionError as e:
 				#raise ConnectionError("Access denied.") from e
 				raise ConnectionError(str(e)) from e
@@ -122,18 +122,18 @@ class RemotePath:
 		'''Returns the first connection with the given hostname.'''
 
 		for netloc in cls.ssh_connections:
-			if netloc == hostname or netloc.endswith(f"@{hostname}"):
+			if netloc == hostname or netloc.endswith(f"@{hostname}") or f"@{hostname}:" in netloc:
 				yield netloc
 
 	@classmethod
 	def os_name(cls, hostname: str) -> str:
-		'''Get the server's os name. Currently returns either 'nt' or 'posix'.'''
+		'''Get the server's os name. Currently returns either "nt" or "posix".'''
 
 		try:
 			os_name = cls.os_names[hostname]
 		except KeyError:
-			netloc = cls.get_netlocs_from_hostname(hostname)
-			ssh = cls.ssh_connections[next(netloc)]
+			netloc = next(cls.get_netlocs_from_hostname(hostname))
+			ssh = cls.ssh_connections[netloc]
 			stdin, stdout, stderr = ssh.exec_command("uname -a")
 			stdout_output = stdout.read() # drain buffers
 			stderr_output = stderr.read()
@@ -152,14 +152,15 @@ class RemotePath:
 	def shutdown(cls, hostname: str) -> None:
 		'''Command server to shut down (power off).'''
 
-		netloc = cls.get_netlocs_from_hostname(hostname)
+		netlocs = cls.get_netlocs_from_hostname(hostname)
 		try:
-			ssh = cls.ssh_connections[next(netloc)]
+			netloc = next(netlocs)
+			ssh = cls.ssh_connections[netloc]
 			# Wait 1 minute so exit status can be read.
 			if cls.os_name == "nt":
 				stdin, stdout, stderr = ssh.exec_command("shutdown /s /t 60")
 			else:
-				password = os.environ.get(cls.PASSWORD) or getpass(f"Password for {parsed.netloc}: ")
+				password = os.getenv(cls.PASSWORD) or getpass(f"Password for {netloc}: ")
 				# Sync to clear disk cache.
 				command = f"echo {password} | sudo -S sync && echo {password} | sudo -S shutdown -h +1"
 				stdin, stdout, stderr = ssh.exec_command(command)
@@ -173,7 +174,9 @@ class RemotePath:
 			else:
 				logger.info(f"Shutting down system in 1 minute: {hostname}")
 				# Forget all connections to the shut down host.
-				for n in netloc:
+				del cls.sftp_connections[netloc]
+				del cls.ssh_connections[netloc]
+				for n in netlocs:
 					del cls.sftp_connections[n]
 					del cls.ssh_connections[n]
 

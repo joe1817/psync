@@ -21,8 +21,8 @@ class TestSFTP(unittest.TestCase):
 
 	@classmethod
 	def setUpClass(cls):
-		if os.getenv("TEST_REMOTE", None).lower() not in ["true", "t", "yes", "y", "1", "on"]:
-			raise unittest.SkipTest(f"Environment variable TEST_REMOTE is set to false. Skipping test.")
+		if os.getenv("TEST_REMOTE", "0").lower() not in ["true", "t", "yes", "y", "1", "on"]:
+			raise unittest.SkipTest(f"Environment variable TEST_REMOTE is absent or set to false. Skipping test.")
 		# read login info from config file
 		if not CONFIG_PATH.exists():
 			raise unittest.SkipTest(f"Configuration file not found at: {CONFIG_PATH}. Skipping test.")

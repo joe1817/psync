@@ -93,7 +93,7 @@ class Results:
 			lines.append(f"Log File: {self.config.log_file}")
 		key_length = max(line.find(":") for line in lines)
 		for line in lines:
-			yield f"{line:>{len(line) + key_length - line.find(":")}}"
+			yield f"{line:>{len(line) + key_length - line.find(':')}}"
 
 class Sync:
 	'''

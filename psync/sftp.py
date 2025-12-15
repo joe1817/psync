@@ -342,7 +342,7 @@ class RemotePath:
 					for entry in entries:
 						try:
 							if followlinks:
-								is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+								is_dir = entry.is_dir(follow_symlinks=True) or (hasattr(entry, "is_junction") and entry.is_junction())
 							else:
 								is_dir = entry.is_dir(follow_symlinks=False)
 						except OSError as e:
@@ -459,10 +459,6 @@ class RemotePath:
 		st = self.stat(follow_symlinks=False)
 		assert st.st_mode is not None
 		return stat.S_ISLNK(st.st_mode)
-
-	# needed to mimic os.DirEntry
-	def is_junction(self) -> bool:
-		return False # TODO
 
 	def is_dir(self, *, follow_symlinks:bool = True) -> bool:
 		'''Returns `True` if the remote file/directory is a directory.'''

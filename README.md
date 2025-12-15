@@ -14,7 +14,6 @@
 
 ## Requirements
 - python 3.13+
-  - python 3.9+ if the `glob2` package is installed
 
 ## Dependencies
 - `paramiko` (only if you intend to use SFTP)

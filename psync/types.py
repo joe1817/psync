@@ -4,7 +4,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Protocol, TypeVar, Any, Iterator, runtime_checkable
+from typing import Union, Protocol, TypeVar, Any, Iterator, runtime_checkable
 
 if sys.version_info >= (3, 12):
     from collections.abc import Buffer
@@ -67,8 +67,9 @@ class _AbstractPath(Protocol):
 	def is_symlink(self: T_AbstractPath) -> bool:
 		...
 
-	def is_junction(self: T_AbstractPath) -> bool:
-		...
+#	not in PosixPath
+#	def is_junction(self: T_AbstractPath) -> bool:
+#		...
 
 	def is_dir(self: T_AbstractPath, *, follow_symlinks:bool = True) -> bool:
 		...

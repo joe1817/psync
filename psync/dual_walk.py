@@ -579,7 +579,7 @@ class _DualWalk:
 						nonstandard_entries.append(entry)
 						continue
 					if self.config.follow_symlinks:
-						is_dir = entry.is_dir(follow_symlinks=True) or entry.is_junction()
+						is_dir = entry.is_dir(follow_symlinks=True) or (hasattr(entry, "is_junction") and entry.is_junction())
 					else:
 						is_dir = entry.is_dir(follow_symlinks=False)
 				except OSError as e:

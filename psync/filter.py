@@ -4,13 +4,9 @@
 import os
 import sys
 import re
+import glob
 from dataclasses import dataclass
 from collections import namedtuple
-
-if sys.version_info >= (3, 13):
-	import glob
-else:
-	import glob2 as glob
 
 from .types import _AbstractPath
 from .errors import StateError

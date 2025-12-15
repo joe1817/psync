@@ -73,9 +73,9 @@ class _ConsoleFormatter(logging.Formatter):
 		msg = super().format(record)
 		extra_indent = "" if getattr(record, _RecordTag.SYNC_OP.name, False) else "  "
 		if record.levelno == logging.DEBUG:
-			msg = f"  {extra_indent}{msg.replace("\n", f"\n  {extra_indent}").rstrip(" ")}"
+			msg = extra_indent + msg.replace("\n", f"\n  {extra_indent}").rstrip(" ")
 		else:
-			msg = f"{extra_indent}{msg.replace("\n", f"\n{extra_indent}").rstrip(" ")}"
+			msg = extra_indent + msg.replace("\n", f"\n{extra_indent}").rstrip(" ")
 		return msg
 
 class _LogFileFormatter(logging.Formatter):
@@ -90,7 +90,7 @@ class _LogFileFormatter(logging.Formatter):
 	def format(self, record):
 		msg = super().format(record)
 		if record.levelno == logging.DEBUG:
-			msg = f"  {msg.replace("\n", "\n  ").rstrip(" ")}"
+			msg = "  " + msg.replace("\n", "\n  ").rstrip(" ")
 		elif record.levelno == logging.INFO:
 			pass
 		elif record.levelno == logging.WARNING:

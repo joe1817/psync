@@ -147,38 +147,37 @@ class Sync:
 			src    (str or PathLike) : The path of the root directory to copy files from. Can be a symlink to a directory.
 			dst    (str or PathLike) : The path of the root directory to copy files to. Can be a symlink to a directory.
 
-			filter   (str or Filter) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. (Defaults to "+ **/*", which searches all directories and copies all files.)
-			translate_symlinks (bool) : Whether to copy symbolic links literally, without translation to the dst system. (Defaults to `True`.)
-			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
-			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
-
 			create_files      (bool) : Whether to create files in `dst`. (Defaults to `True`.)
 			create_dir_tree   (bool) : Whether to recreate the directory tree from `src` in `dst`. (Defaults to `False`.)
 			renames           (bool) : Whether to rename files and directories in `dst` to match those in `src'. (Defaults to `True`.)
 			delete_files      (bool) : Whether to delete files that are in `dst` but not `src`. If `trash` is set, then files will be moved into it instead of deleted. (Defaults to `False`.)
 			delete_empty_dirs (bool) : Whether to delete empty directories that are in `dst` but not `src`. If `trash` is set, then empty directories will be moved into it instead of deleted. (Defaults to `False`.)
 			trash  (str or PathLike) : The path of the root directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_entries`. (Defaults to `None`.)
-
 			force_update      (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
 			force_replace     (bool) : Whether to allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
 			global_renames    (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
 			content_match     (bool) : Whether to read the last 1kb of files when finding renamed files in `dst`. If `False`, the backup process will rely solely on file metadata. (Defaults to `False`.)
 			rename_threshold   (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `10000`.)
 			mirror            (bool) : Equivalent to setting create_dir_tree, delete_files, force_update, and force_replace to `True`. (Defaults to `False`.)
-
-			shutdown_src      (bool) : Shutdown the src system when done. (Defaults to `False`.)
-			shutdown_dst      (bool) : Shutdown the dst system when done. (Defaults to `False`.)
-			err_limit          (int) : Quit after this many filesystem errors. A value of `-1` means no limit. (Defaults to `-1`.)
 			dry_run           (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
+			err_limit          (int) : Quit after this many filesystem errors. A value of `-1` means no limit. (Defaults to `-1`.)
+
+			filter   (str or Filter) : The filter string that includes/excludes file system entries from the `src` and `dst` directories. Similar to rsync, the format of the filter string is one of more repetitions of: (+ or -), followed by a list of one of more relative path patterns. Including (+) or excluding (-) of file system entries is determined by the preceding symbol of the first matching pattern. Included files will be copied over as part of the backup, while included directories will be searched. Each pattern ending with "/" will apply to directories only. Otherise the pattern will apply only to files. (Defaults to "+ **/*", which searches all directories and copies all files.)
+
+			translate_symlinks (bool) : Whether to copy symbolic links literally, without translation to the dst system. (Defaults to `True`.)
+			ignore_symlinks   (bool) : Whether to ignore symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `follow_symlinks`. (Defaults to `False`.)
+			follow_symlinks   (bool) : Whether to follow symbolic links under `src` and `dst`. Note that `src` and `dst` themselves will be followed regardless of this argument. Mutually exclusive with `ignore_symlinks`. (Defaults to `False`.)
 
 			log_file (Path|bool|str) : The path of the log file to use. It will be created if it does not exist. A value of `True` or "auto" means a tempfile will be used for the log, and it will be moved to the user's home directory after the backup is done. A value of `None` will skip logging to a file. (Defaults to `None`.)
 			file_level         (int) : Log level for logging to file. (Default to `logging.DEBUG`.)
 			print_level        (int) : Log level for printing to console. (Default to `logging.INFO`.)
 			debug         (bool|int) : Sets console and file debugging levels to DEBUG. If an integer, the masks Sync.RAISE_UNKNOWN_ERRORS and Sync.RAISE_FS_ERRORS can be used to halt on their respective error types. (Defaults to `False`.)
-
 			title              (str) : A strng to be printed in the header.
 			no_header         (bool) : Whether to skip logging header information. (Defaults to `False`.)
 			no_footer         (bool) : Whether to skip logging footer information. (Defaults to `False`.)
+
+			shutdown_src      (bool) : Shutdown the src system when done. (Defaults to `False`.)
+			shutdown_dst      (bool) : Shutdown the dst system when done. (Defaults to `False`.)
 		'''
 
 		self._state = Sync._SyncState.INVALID
@@ -189,29 +188,26 @@ class Sync:
 		self.src = src
 		self.dst = dst
 
-		self._filter             : Filter = PathFilter("+ **/*")
-		self._translate_symlinks : bool = True
-		self._ignore_symlinks    : bool = False
-		self._follow_symlinks    : bool = False
-
 		self._create_files       : bool = True
 		self._create_dir_tree    : bool = False
 		self._renames            : bool = True
 		self._delete_files       : bool = False
 		self._delete_empty_dirs  : bool = False
 		self._trash              : _AbstractPath|Literal[_AUTO_TRASH_DIR]|None = None
-
 		self._force_update       : bool = False
 		self._force_replace      : bool = False
 		self._global_renames     : bool = False
 		self._content_match      : bool = False
 		self._rename_threshold   : int  = 10000
 		self._mirror             : bool = False
-
-		self._shutdown_src       : bool = False
-		self._shutdown_dst       : bool = False
-		self._err_limit          : int  = -1
 		self._dry_run            : bool = False
+		self._err_limit          : int  = -1
+
+		self._filter             : Filter = PathFilter("+ **/*")
+
+		self._translate_symlinks : bool = True
+		self._ignore_symlinks    : bool = False
+		self._follow_symlinks    : bool = False
 
 		self._log_file           : Path|Literal[_AUTO_LOGFILE]|None = None # TODO implement RemotePath
 		self._tmp_log_file       : Path|None = None
@@ -219,6 +215,9 @@ class Sync:
 		self._print_level        : int = logging.INFO
 		self._debug              : bool|int = False
 		self._title              : str|None = None
+
+		self._shutdown_src       : bool = False
+		self._shutdown_dst       : bool = False
 
 		# no properties for these
 		self._handler_file       : logging.FileHandler|None = None
@@ -442,25 +441,6 @@ class Sync:
 		self._dst = dst
 
 	@property
-	def filter(self) -> Filter:
-		return self._filter
-
-	@filter.setter
-	def filter(self, val:str|Filter) -> None:
-		if not isinstance(val, str|Filter):
-			raise TypeError(f"Bad type for property 'filter' (expected str|Filter): {val}")
-
-		filter: Filter
-		if isinstance(val, str):
-			# TODO? convert sep?
-			filter = PathFilter(val)
-		else:
-			filter = val
-
-		assert isinstance(filter, Filter)
-		self._filter = filter
-
-	@property
 	def create_files(self) -> bool:
 		return self._create_files
 
@@ -611,6 +591,45 @@ class Sync:
 		self._rename_threshold = val
 
 	@property
+	def dry_run(self) -> bool:
+		return self._dry_run
+
+	@dry_run.setter
+	def dry_run(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'dry_run' (expected bool): {val}")
+		self._dry_run = val
+
+	@property
+	def err_limit(self) -> int:
+		return self._err_limit
+
+	@err_limit.setter
+	def err_limit(self, val:int) -> None:
+		if not isinstance(val, int):
+			raise TypeError(f"Bad type for arg 'err_limit' (expected int): {val}")
+		self._err_limit = val
+
+	@property
+	def filter(self) -> Filter:
+		return self._filter
+
+	@filter.setter
+	def filter(self, val:str|Filter) -> None:
+		if not isinstance(val, str|Filter):
+			raise TypeError(f"Bad type for property 'filter' (expected str|Filter): {val}")
+
+		filter: Filter
+		if isinstance(val, str):
+			# TODO? convert sep?
+			filter = PathFilter(val)
+		else:
+			filter = val
+
+		assert isinstance(filter, Filter)
+		self._filter = filter
+
+	@property
 	def translate_symlinks(self) -> bool:
 		return self._translate_symlinks
 
@@ -643,46 +662,6 @@ class Sync:
 		if val and self.ignore_symlinks:
 			raise StateError("Mutually exclusive properties: 'ignore_symlinks' and 'follow_symlinks'")
 		self._follow_symlinks = val
-
-	@property
-	def shutdown_src(self) -> bool:
-		return self._shutdown_src
-
-	@shutdown_src.setter
-	def shutdown_src(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'shutdown_src' (expected bool): {val}")
-		self._shutdown_src = val
-
-	@property
-	def shutdown_dst(self) -> bool:
-		return self._shutdown_dst
-
-	@shutdown_dst.setter
-	def shutdown_dst(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'shutdown_dst' (expected bool): {val}")
-		self._shutdown_dst = val
-
-	@property
-	def err_limit(self) -> int:
-		return self._err_limit
-
-	@err_limit.setter
-	def err_limit(self, val:int) -> None:
-		if not isinstance(val, int):
-			raise TypeError(f"Bad type for arg 'err_limit' (expected int): {val}")
-		self._err_limit = val
-
-	@property
-	def dry_run(self) -> bool:
-		return self._dry_run
-
-	@dry_run.setter
-	def dry_run(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'dry_run' (expected bool): {val}")
-		self._dry_run = val
 
 	@property
 	def log_file(self) -> Path|Literal[_AUTO_LOGFILE]|None:
@@ -734,6 +713,26 @@ class Sync:
 		if not isinstance(val, str|None):
 			raise TypeError(f"Bad type for arg 'title' (expected str|None): {val}")
 		self._title = val
+
+	@property
+	def shutdown_src(self) -> bool:
+		return self._shutdown_src
+
+	@shutdown_src.setter
+	def shutdown_src(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'shutdown_src' (expected bool): {val}")
+		self._shutdown_src = val
+
+	@property
+	def shutdown_dst(self) -> bool:
+		return self._shutdown_dst
+
+	@shutdown_dst.setter
+	def shutdown_dst(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'shutdown_dst' (expected bool): {val}")
+		self._shutdown_dst = val
 
 	# -------------------------------------------------------------------------
 	# Derived properties

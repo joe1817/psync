@@ -48,4 +48,4 @@ except ImportError:
 		def __eq__(self, other: Any) -> bool|NotImplementedType:
 			if isinstance(other, OrderedSet):
 				return self._items.keys() == other._items.keys()
-			return NotImplemented # TODO check what ordered_set.OrderedSet when testing a standard collection
+			return NotImplemented # TODO check what ordered_set.OrderedSet does

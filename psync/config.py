@@ -10,7 +10,7 @@ from .types import _AbstractPath
 
 @dataclass(frozen=True)
 class _SyncConfig:
-	'''Pass the essential properties from `Sync` to a read-only data structure.'''
+	'''Collects the essential properties of `Sync` into a read-only data structure.'''
 
 	src                : _AbstractPath
 	dst                : _AbstractPath

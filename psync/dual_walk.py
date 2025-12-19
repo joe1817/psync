@@ -245,7 +245,7 @@ class _Diff:
 		Most renames will be a chain of length 1, but renames that involve swaps or overlapping file names will have longer chain lengths.
 		'''
 
-		if dst_dir_hash is None:
+		if src_dir_hash is None or dst_dir_hash is None:
 			rename_map = self.get_file_rename_map()
 		else:
 			rename_map = self.get_dir_rename_map(src_dir_hash, dst_dir_hash)
@@ -359,25 +359,19 @@ class _Diff:
 		'''Remove renamed files from other collections in this `_Diff`.'''
 
 		for rename_from in removed_by_rename:
-			is_dir = type(rename_from) == _Dir
-			try:
-				if is_dir:
-					del self.dir_matches[rename_from]
-				else:
-					del self.file_matches[rename_from]
-			except KeyError:
-				pass
-
-			if is_dir:
+			if type(rename_from) == _Dir:
+				self.dir_matches.pop(rename_from, None) # type: ignore [call-overload]
 				self.dst_only_dirs.discard(rename_from)
 			else:
+				assert isinstance(rename_from, _File)
+				self.file_matches.pop(rename_from, None) # type: ignore [call-overload]
 				self.dst_only_files.discard(rename_from)
 
 		for rename_to in created_by_rename:
-			is_dir = type(rename_to) == _Dir
-			if is_dir:
+			if type(rename_to) == _Dir:
 				self.src_only_dirs.discard(rename_to)
 			else:
+				assert isinstance(rename_to, _File)
 				self.src_only_files.discard(rename_to)
 
 	def get_rename_pairs(self, src_dir_hash = None, dst_dir_hash = None):
@@ -764,15 +758,9 @@ class _DualWalk:
 
 		# don't try to match with a nonstandard file (socket, named pipe, etc)
 		for f in src_nonstandard:
-			try:
-				del in_dst[_Normalized(f)]
-			except KeyError:
-				pass
+			in_dst.pop(_Normalized(f), None)
 		for f in dst_nonstandard:
-			try:
-				del in_src_only[_Normalized(f)]
-			except ValueError:
-				pass
+			in_src_only.pop(_Normalized(f), None)
 
 		for dst_normalized, matches in in_dst.items():
 			dst_entry = dst_normalized.unwrapped

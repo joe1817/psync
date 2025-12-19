@@ -46,6 +46,6 @@ except ImportError:
 			return f"OrderedSet([{elements}])"
 
 		def __eq__(self, other: Any) -> bool|NotImplementedType:
-			if isinstance(other, OrderedSet):
+			if isinstance(other, type(self)):
 				return self._items.keys() == other._items.keys()
 			return NotImplemented # TODO check what ordered_set.OrderedSet does

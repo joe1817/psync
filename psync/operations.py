@@ -507,6 +507,7 @@ class _OperationFactory:
 
 	def get_update_ops(self, src_relpath:_Relpath, dst_relpath:_Relpath, diff:_Diff) -> Iterator[Operation]:
 		if isinstance(dst_relpath, _File):
+			assert isinstance(src_relpath, _File)
 			src_time = diff.src_file_metadata[src_relpath].mtime
 			dst_time = diff.dst_file_metadata[dst_relpath].mtime
 			byte_diff = diff.src_file_metadata[src_relpath].size - diff.dst_file_metadata[dst_relpath].size

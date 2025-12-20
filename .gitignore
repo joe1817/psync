@@ -1,2 +1,7 @@
+.editorconfig
+
 __pycache__/
+.mypy_cache/
+
 test_sftp.ini
+*.log

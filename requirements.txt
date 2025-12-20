@@ -1,0 +1,8 @@
+# optimization
+ordered-set
+
+# remote syncing
+paramiko
+
+# automatic syncing
+watchdog

@@ -200,7 +200,7 @@ class _Diff:
 			assert dst_file is not None
 
 			# Ignore if last 1kb do not match.
-			if not self.config.content_match:
+			if not self.config.match_tail:
 				try:
 					if not _last_bytes(self.config.src / src_file) == _last_bytes(self.config.dst / dst_file):
 						continue

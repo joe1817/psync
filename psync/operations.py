@@ -38,7 +38,52 @@ def _get_operations(config: _SyncConfig) -> Iterator["Operation"]:
 	a: _Relpath
 	b: _Relpath
 
-	if config.global_renames:
+	if config.low_memory:
+		# No need to read in the whole directory tree when low_memory is True. Instead, a folder-by-folder approach uses less memory and starts immediately.
+
+		dw = _DualWalk(config)
+		for diff in dw:
+
+			# renames
+			if config.renames:
+				for rename_from, rename_to in diff.get_rename_pairs():
+					yield from factory.get_rename_ops(rename_from, rename_to)
+
+			# deletes
+			if config.delete_files:
+				for f in diff.dst_only_files:
+					yield from factory.get_delete_ops(f, diff)
+				if diff.src_parent is None:
+					yield from factory.get_delete_ops(diff.dst_parent, diff)
+
+			# updates
+			#for a, b in diff.dir_matches.items():
+			#	updates.extend(factory.get_update_ops(a, b, diff)) # updating dirs currently does nothing
+			for a, b in diff.file_matches.items():
+				yield from factory.get_update_ops(a, b, diff)
+
+			# creates
+			if config.create_dir_tree:
+				# create all matched directories, even if they are empty or contain no files
+				if diff.dst_parent is None:
+					yield from factory.get_create_ops(diff.src_parent, diff)
+			elif config.create_files and len(diff.src_only_files) > 0:
+				# create directories only when they are needed to hold file children
+				if diff.dst_parent is None:
+					yield from factory.get_create_ops(diff.src_parent, diff)
+			if config.create_files:
+				for f in diff.src_only_files:
+					yield from factory.get_create_ops(f, diff)
+
+		# TODO not implemented
+		#if config.delete_empty_dirs:
+		#	dirs_to_delete = ...
+		#	delete_ops = []
+		#	for d in dirs_to_delete:
+		#		delete_ops.extend(factory.get_delete_ops(d, None))
+		#	yield from sorted(delete_ops)
+
+	else:
 		# The entire directory tree needs to be read in to find global renames (ie, directory renames or file renames that span between two different directories).
 
 		deletes: list["Operation"] = []
@@ -100,51 +145,6 @@ def _get_operations(config: _SyncConfig) -> Iterator["Operation"]:
 		yield from deletes
 		yield from updates
 		yield from creates
-
-	else:
-		# No need to read in the whole directory tree when global_renames is False. Instead, a folder-by-folder apprach is faster.
-
-		dw = _DualWalk(config)
-		for diff in dw:
-
-			# renames
-			if config.renames:
-				for rename_from, rename_to in diff.get_rename_pairs():
-					yield from factory.get_rename_ops(rename_from, rename_to)
-
-			# deletes
-			if config.delete_files:
-				for f in diff.dst_only_files:
-					yield from factory.get_delete_ops(f, diff)
-				if diff.src_parent is None:
-					yield from factory.get_delete_ops(diff.dst_parent, diff)
-
-			# updates
-			#for a, b in diff.dir_matches.items():
-			#	updates.extend(factory.get_update_ops(a, b, diff)) # updating dirs currently does nothing
-			for a, b in diff.file_matches.items():
-				yield from factory.get_update_ops(a, b, diff)
-
-			# creates
-			if config.create_dir_tree:
-				# create all matched directories, even if they are empty or contain no files
-				if diff.dst_parent is None:
-					yield from factory.get_create_ops(diff.src_parent, diff)
-			elif config.create_files and len(diff.src_only_files) > 0:
-				# create directories only when they are needed to hold file children
-				if diff.dst_parent is None:
-					yield from factory.get_create_ops(diff.src_parent, diff)
-			if config.create_files:
-				for f in diff.src_only_files:
-					yield from factory.get_create_ops(f, diff)
-
-		# TODO not implemented
-		#if config.delete_empty_dirs:
-		#	dirs_to_delete = ...
-		#	delete_ops = []
-		#	for d in dirs_to_delete:
-		#		delete_ops.extend(factory.get_delete_ops(d, None))
-		#	yield from sorted(delete_ops)
 
 @dataclass(frozen=True)
 class Operation:

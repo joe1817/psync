@@ -177,6 +177,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
+				low_memory = True,
 				dry_run = True,
 				print_level = 100,
 			).run()
@@ -201,6 +202,7 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -279,6 +281,8 @@ class TestSync(unittest.TestCase):
 				create_dir_tree = True,
 				delete_files = True,
 				trash = "auto",
+				low_memory = True,
+				rename_threshold = 1000,
 				print_level = 100,
 			).run()
 
@@ -329,6 +333,7 @@ class TestSync(unittest.TestCase):
 				dst,
 				filter = "+ a* a*/*.txt",
 				translate_symlinks = False,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -355,6 +360,7 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -436,6 +442,7 @@ class TestSync(unittest.TestCase):
 				dst,
 				create_dir_tree = True,
 				delete_files = True,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -516,6 +523,7 @@ class TestSync(unittest.TestCase):
 				create_dir_tree = True,
 				delete_files = True,
 				force_replace = True,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -546,6 +554,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				follow_symlinks = False,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -582,6 +591,7 @@ class TestSync(unittest.TestCase):
 				translate_symlinks = True, # these symlink settings are all default
 				follow_symlinks = False,
 				ignore_symlinks = False,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -624,8 +634,9 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				content_match = True,
+				match_tail = True,
 				rename_threshold = 0,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -662,8 +673,8 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				mirror = True,
-				global_renames = True,
 				rename_threshold = 1000,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -699,7 +710,7 @@ class TestSync(unittest.TestCase):
 				dst,
 				delete_files = True,
 				force_replace = True,
-				rename_threshold = 0,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -739,6 +750,7 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
+				low_memory = True,
 				print_level = 100,
 			).run()
 
@@ -795,8 +807,6 @@ class TestSync(unittest.TestCase):
 				src,
 				dst,
 				delete_files = True,
-				global_renames = True,
-				rename_threshold = 0,
 				print_level = 100,
 			).run()
 
@@ -869,8 +879,6 @@ class TestSync(unittest.TestCase):
 				dst,
 				delete_files = True,
 				force_replace = True,
-				global_renames = True,
-				rename_threshold = 0,
 				print_level = 100,
 			).run()
 
@@ -915,9 +923,7 @@ class TestSync(unittest.TestCase):
 			results = core.Sync(
 				src,
 				dst,
-				global_renames = True,
-				content_match = True,
-				rename_threshold = 0,
+				match_tail = True,
 				print_level = 100,
 			).run()
 

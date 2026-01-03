@@ -14,6 +14,25 @@ else:
 # used to make sure _AbstractPath's methods return the same type as itself, not any other concrete class that implements _AbstractPath
 T_AbstractPath = TypeVar("T_AbstractPath", bound="_AbstractPath")
 
+class _AbstractStat(Protocol):
+	'''Protocol class representing a stat-like object.'''
+
+	@property
+	def st_size(self) -> int:
+		...
+
+	@property
+	def st_mode(self) -> int:
+		...
+
+	@property
+	def st_atime(self) -> float:
+		...
+
+	@property
+	def st_mtime(self) -> float:
+		...
+
 @runtime_checkable
 class _AbstractPath(Protocol):
 	'''Protocol class representing the methods a Path-like object needs to do a sync operation.'''
@@ -58,7 +77,7 @@ class _AbstractPath(Protocol):
 	def with_name(self: T_AbstractPath, new_name:str) -> T_AbstractPath:
 		...
 
-	def stat(self: T_AbstractPath, *, follow_symlinks:bool = True) -> Any: # TODO use another protocol for stat + paramiko.sftp_attr.SFTPAttributes
+	def stat(self: T_AbstractPath, *, follow_symlinks:bool = True) -> _AbstractStat:
 		...
 
 	def exists(self: T_AbstractPath, *, follow_symlinks:bool = True) -> bool:

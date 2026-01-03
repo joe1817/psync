@@ -637,6 +637,41 @@ class TestSync(unittest.TestCase):
 
 	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+	def test_run__renames2(self):
+		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
+			root = Path(temp_root)
+			file_structure = {
+				"src": {
+					"b": {
+						"1": (None, 1),
+						"2": (None, 2),
+					},
+				},
+				"dst": {
+					"a": {
+						"1": (None, 1),
+						"2": (None, 2),
+					},
+				},
+			}
+			create_file_structure(root, file_structure)
+			src = root / "src"
+			dst = root / "dst"
+
+			results = core.Sync(
+				src,
+				dst,
+				mirror = True,
+				global_renames = True,
+				rename_threshold = 1000,
+				print_level = 100,
+			).run()
+
+			self.assertTrue(results.status == core.Results.Status.COMPLETED)
+			self.assertEqual(hash_directory(src), hash_directory(dst))
+
+	#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 	def test_run__rename_blocked(self):
 		with tempfile.TemporaryDirectory(suffix=None, prefix=None, dir=None) as temp_root:
 			root = Path(temp_root)

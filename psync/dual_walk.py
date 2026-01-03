@@ -508,9 +508,10 @@ class _DualWalk:
 			if src_parent_dir is not None:
 				if len(src_files) + len(src_dirs) == src_dir_size:
 					try:
-						dirs = [self.src_dir_hash[d] for d in src_dirs] # raises KeyError
-						files = sorted((k.name,v) for k,v in src_file_metadata.items())
-						self.src_dir_hash[src_parent_dir] = hash(tuple(files + dirs))
+						if all(metadata.size >= self.config.rename_threshold for metadata in src_file_metadata.values()):
+							dirs = [self.src_dir_hash[d] for d in src_dirs] # raises KeyError
+							files = sorted((k.name,v) for k,v in src_file_metadata.items())
+							self.src_dir_hash[src_parent_dir] = hash(tuple(files + dirs))
 					except KeyError:
 						# hash unknown for some subdir, so it's unknown for this dir too
 						pass
@@ -518,9 +519,10 @@ class _DualWalk:
 			if dst_parent_dir is not None:
 				if len(dst_files) + len(dst_dirs) == dst_dir_size:
 					try:
-						dirs = [self.dst_dir_hash[d] for d in dst_dirs] # raises KeyError
-						files = sorted((k.name,v) for k,v in dst_file_metadata.items())
-						self.dst_dir_hash[dst_parent_dir] = hash(tuple(files + dirs))
+						if all(metadata.size >= self.config.rename_threshold for metadata in src_file_metadata.values()):
+							dirs = [self.dst_dir_hash[d] for d in dst_dirs] # raises KeyError
+							files = sorted((k.name,v) for k,v in dst_file_metadata.items())
+							self.dst_dir_hash[dst_parent_dir] = hash(tuple(files + dirs))
 					except KeyError:
 						# hash unknown for some subdir, so it's unknown for this dir too
 						pass

@@ -72,11 +72,15 @@ class RemotePath:
 					password = password,
 					timeout  = timeout,
 				)
-			except socket.gaierror as e:
-				raise ConnectionError("Invalid hostname.") from e
+			except paramiko.ssh_exception.NoValidConnectionsError:
+				raise ConnectionError(str(e)) from e
 			except paramiko.ssh_exception.AuthenticationException as e:
 				raise ConnectionError(str(e)) from e
-			except TimeoutError as e:
+			except (paramiko.SSHException, socket.error) as e:
+				raise ConnectionError(str(e)) from e
+			except socket.gaierror as e:
+				raise ConnectionError("Invalid hostname.") from e
+			except (TimeoutError, socket.timeout) as e:
 				raise ConnectionError("Host timeout.") from e
 			except PermissionError as e:
 				#raise ConnectionError("Access denied.") from e

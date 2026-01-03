@@ -23,8 +23,8 @@ class _SyncConfig:
 	trash              : _AbstractPath|None
 	force_update       : bool
 	force_replace      : bool
-	global_renames     : bool
-	content_match      : bool
+	low_memory         : bool
+	match_tail         : bool
 	rename_threshold   : int
 	dry_run            : bool
 	err_limit          : int

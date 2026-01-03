@@ -156,9 +156,9 @@ class Sync:
 			trash      (str|_AbstractPath) : The path of the directory to move "extra" files to. ("Extra" files are those that are in `dst` but not `src`.) Must be on the same file system as `dst`. If set to "auto", then a directory will automatically be made next to `dst`. "Extra" files will not be moved if this argument is `None`. Mutually exclusive with `delete_entries`. (Defaults to `None`.)
 			force_update            (bool) : Whether to force `dst` to match `src`. This will allow replacement of any newer files in `dst` with older copies in `src`. (Defaults to `False`.)
 			force_replace           (bool) : Whether to allow files to replace dirs (or vice versa) where their names match. (Defaults to `False`.)
-			global_renames          (bool) : Whether to search for renamed files between directories. If `False`, the search will stay within each directory. (Defaults to `False`.)
-			content_match           (bool) : Whether to read the last 1kb of files when finding renamed files in `dst`. If `False`, the backup process will rely solely on file metadata. (Defaults to `False`.)
-			rename_threshold         (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `10000`.)
+			low_memory              (bool) : Whether to operate in low memory mode. Note that renames in this mode will only be found within the same folder. (Defaults to `False`.)
+			match_tail           (bool) : Whether to read the last 1kb of files when finding renamed files in `dst`. If `False`, the backup process will rely solely on file metadata. (Defaults to `False`.)
+			rename_threshold         (int) : The minimum size in bytes needed to consider renaming files in `dst` that were renamed in `src`. Renamed files below this threshold will be simply deleted in `dst` and their replacements created. (Defaults to `0`.)
 			mirror                  (bool) : Equivalent to setting create_dir_tree, delete_files, force_update, and force_replace to `True`. (Defaults to `False`.)
 			dry_run                 (bool) : Whether to hold off performing any operation that would make a file system change. Changes that would have occurred will still be printed to console. (Defaults to `False`.)
 			err_limit                (int) : Quit after this many filesystem errors. A value of `-1` means no limit. (Defaults to `-1`.)
@@ -199,9 +199,9 @@ class Sync:
 		self._trash              : _AbstractPath|Literal[_AUTO_TRASH_DIR]|None = None
 		self._force_update       : bool = False
 		self._force_replace      : bool = False
-		self._global_renames     : bool = False
-		self._content_match      : bool = False
-		self._rename_threshold   : int  = 10000
+		self._low_memory         : bool = False
+		self._match_tail         : bool = False
+		self._rename_threshold   : int  = 0
 		self._mirror             : bool = False
 		self._dry_run            : bool = False
 		self._err_limit          : int  = -1
@@ -576,24 +576,24 @@ class Sync:
 		self._force_replace = val
 
 	@property
-	def global_renames(self) -> bool:
-		return self._global_renames
+	def low_memory(self) -> bool:
+		return self._low_memory
 
-	@global_renames.setter
-	def global_renames(self, val:bool) -> None:
+	@low_memory.setter
+	def low_memory(self, val:bool) -> None:
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'global_renames' (expected bool): {val}")
-		self._global_renames = val
+			raise TypeError(f"Bad type for arg 'low_memory' (expected bool): {val}")
+		self._low_memory = val
 
 	@property
-	def content_match(self) -> bool:
-		return self._content_match
+	def match_tail(self) -> bool:
+		return self._match_tail
 
-	@content_match.setter
-	def content_match(self, val:bool) -> None:
+	@match_tail.setter
+	def match_tail(self, val:bool) -> None:
 		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for arg 'content_match' (expected bool): {val}")
-		self._content_match = val
+			raise TypeError(f"Bad type for arg 'match_tail' (expected bool): {val}")
+		self._match_tail = val
 
 	@property
 	def rename_threshold(self) -> int:

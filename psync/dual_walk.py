@@ -92,8 +92,8 @@ class _Relpath:
 #	def __str__(self):
 #		return self.relpath
 
-#	def __repr__(self):
-#		return f"Relpath({self.real})"
+	def __repr__(self):
+		return f"{type(self).__name__}{self.real}"
 
 	def is_relative_to(self, other):
 		if other.relpath == ".":

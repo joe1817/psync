@@ -251,9 +251,9 @@ class _Diff:
 			rename_map = self.get_dir_rename_map(src_dir_hash, dst_dir_hash)
 			rename_map.update(self.get_file_rename_map())
 
-		self.config.logger.debug(f"{src_dir_hash=}")
-		self.config.logger.debug(f"{dst_dir_hash=}")
-		self.config.logger.debug(f"{rename_map=}")
+		#self.config.logger.debug(f"{src_dir_hash=}")
+		#self.config.logger.debug(f"{dst_dir_hash=}")
+		#self.config.logger.debug(f"{rename_map=}")
 
 		chains: list[dict[_Relpath, _Relpath]] = [] # valid, top-level rename chains
 		removed_by_rename: set[_Relpath] = set() # all entries removed by valid top level renames
@@ -295,21 +295,21 @@ class _Diff:
 				if all(a==b for a,b in zip(rename_from.norm, rename_to.norm)):
 					# They are equal or in a direct lineage.
 					# If allowed, a temp file may be needed and that's a headache.
-					self.config.logger.debug(f"ignorng chain: {chain}")
+					#self.config.logger.debug(f"ignorng chain: {chain}")
 					failed.update(chain.keys())
 					chain = {}
 					break
 				if not is_dir and any(rename_to.is_relative_to(d) for d in self.dst_only_files):
 					# A file is blocking this rename.
 					# TODO The rename could go through if the blocking file is to be deleted.
-					self.config.logger.debug(f"ignorng chain: {chain}")
+					#self.config.logger.debug(f"ignorng chain: {chain}")
 					failed.update(chain.keys())
 					chain = {}
 					break
 				if is_dir and any(rename_to.is_relative_to(d) for d in self.dst_only_dirs):
 					# A dir is blocking this rename.
 					# TODO The rename could go through if the blocking dir is to be deleted.
-					self.config.logger.debug(f"ignorng chain: {chain}")
+					#self.config.logger.debug(f"ignorng chain: {chain}")
 					failed.update(chain.keys())
 					chain = {}
 					break
@@ -318,7 +318,7 @@ class _Diff:
 					# The matched entry could be replaced by rename_to, but only if it has an older mtime than rename_to, or --force-update is on.
 					# However, this would be difficult to do for directories.
 					# So for now, just junk the whole chain, and handle it with create/update/delete.
-					self.config.logger.debug(f"ignorng chain: {chain}")
+					#self.config.logger.debug(f"ignorng chain: {chain}")
 					failed.update(chain.keys())
 					chain = {}
 					break
@@ -380,9 +380,9 @@ class _Diff:
 		chains, removed_by_rename, created_by_rename = self.get_rename_chains(src_dir_hash, dst_dir_hash)
 		self.update_other_sets(removed_by_rename, created_by_rename)
 
-		self.config.logger.debug(f"{chains=}")
-		self.config.logger.debug(f"{removed_by_rename=}")
-		self.config.logger.debug(f"{created_by_rename=}")
+		#self.config.logger.debug(f"{chains=}")
+		#self.config.logger.debug(f"{removed_by_rename=}")
+		#self.config.logger.debug(f"{created_by_rename=}")
 
 		for chain in chains:
 			pairs = list(reversed(chain.items()))
@@ -465,6 +465,9 @@ class _DualWalk:
 
 		src_parent_dir, src_dirs, src_files, src_dir_size, src_file_metadata, src_nonstandard = src_list
 		dst_parent_dir, dst_dirs, dst_files, dst_dir_size, dst_file_metadata, dst_nonstandard = dst_list
+		
+		self.config.logger.debug(f"{src_dir_size=}")
+		self.config.logger.debug(f"{dst_dir_size=}")
 
 		if src_parent_dir:
 			self.src_dir_sizes[src_parent_dir] = src_dir_size

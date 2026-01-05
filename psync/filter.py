@@ -231,7 +231,7 @@ class PathFilter(Filter):
 			glob_string += "\\"
 		return glob_string
 
-	def __init__(self, filter_string:str = "**", *, ignore_hidden:bool = False, ignore_case:bool = (os.name=="nt"), is_glob:bool = True, glob_is_escaped:bool = False):
+	def __init__(self, filter_string:str = "**", *, ignore_hidden:bool = False, ignore_case:bool = (os.name=="nt"), is_glob:bool = True, glob_is_escaped:bool = False, default:bool = False):
 		'''
 		Initialize a Filter object.
 
@@ -249,6 +249,7 @@ class PathFilter(Filter):
 		self.ignore_case     = ignore_case
 		self.is_glob         = is_glob
 		self.glob_is_escaped = glob_is_escaped
+		self.default         = default
 
 		self._segments : list[PathFilter._Segment] = []
 		self._tmp_allowed : set[str] = set() # directories implied when allowing an entry with multiple path segments

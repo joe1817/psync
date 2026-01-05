@@ -254,6 +254,8 @@ class PathFilter(Filter):
 		self._segments : list[PathFilter._Segment] = []
 		self._tmp_allowed : set[str] = set() # directories implied when allowing an entry with multiple path segments
 
+		self._validated : bool = False
+
 		if filter_string:
 			action = True
 			for token in PathFilter._tokenize(filter_string, is_glob=is_glob, glob_is_escaped=glob_is_escaped):
@@ -355,6 +357,11 @@ class PathFilter(Filter):
 
 	def filter(self, relpath:str, *, root:_AbstractPath|str|None = None, default:bool|None = None) -> bool:
 		'''Filter paths by comparing them against the filter string.'''
+
+		if not self._validated:
+			self._validated = True
+			if not any(segment.action for segment in self._segments):
+				logger.warning("Filter only has reject patterns. It will never match anything.")
 
 		for segment in self._segments:
 			if segment.matcher.match(relpath):

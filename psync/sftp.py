@@ -118,7 +118,6 @@ class RemotePath:
 			# treat escaped ~ character as literal
 			path = "/" + path[2:]
 
-		path = cls.sftp_connections[parsed.netloc].normalize(path)
 		return cls(path, parsed.netloc)
 
 	@classmethod
@@ -479,9 +478,37 @@ class RemotePath:
 		return stat.S_ISREG(st.st_mode)
 
 	def resolve(self, strict:bool = False) -> "RemotePath":
-		'''Returns a `RemotePath` with an absolute, normalized path string.'''
+		'''Returns a `RemotePath` with an absolute, normalized path string. This method mimics `Path.resolve()` by not raising a FileNotFoundError when the path points to a nonexistent file.'''
 
-		rp = type(self)(RemotePath.sftp_connections[self.netloc].normalize(str(self)), self.netloc)
+		sftp = RemotePath.sftp_connections[self.netloc]
+
+		remote_path = self.path
+		# ~ is replaced in create()
+		#if remote_path.startswith("~"):
+		#	remote_path = remote_path.replace("~", sftp.normalize("."), 1)
+		if not posixpath.isabs(remote_path):
+			remote_path = posixpath.join(sftp.getcwd() or "/", remote_path)
+
+		parts = remote_path.split("/")
+		resolved_path = "/"
+
+		for i, part in enumerate(parts):
+			if not part or part == ".":
+				continue
+
+			# Build the next potential path
+			test_path = posixpath.join(resolved_path, part)
+
+			try:
+				# sftp.normalize() resolves symlinks AND handles '..' physically
+				resolved_path = sftp.normalize(test_path)
+			except (IOError, OSError):
+				# The path doesn't exist
+				# From here on out, switch to lexical normalization
+				remaining_path = posixpath.join(*parts[i:])
+				resolved_path  = posixpath.normpath(posixpath.join(resolved_path, remaining_path))
+
+		rp = type(self)(resolved_path, self.netloc)
 		if rp._stat is None:
 			rp._stat = self._lstat
 		return rp
@@ -617,6 +644,8 @@ class RemotePath:
 		if self.netloc != target.netloc:
 			# TODO need to consider if self netloc is localhost
 			return False
+		if not self.exists():
+			raise FileNotFoundError(f"No such file on remote:'{self}'")
 		return self.resolve() == target.resolve()
 
 	def relative_to(self, target:"RemotePath") -> "RemotePath":
@@ -643,10 +672,10 @@ class RemotePath:
 
 class _RemotePathScanner:
 	def __init__(self, path:RemotePath):
-		try:
-			self.entries = path.iterdir()
-		except paramiko.sftp.SFTPError as e:
-			raise FileNotFoundError() from e # this is to match os.scandir
+		if not path.exists():
+			# match os.scandir() by raising an error if the path doesn't exist
+			raise FileNotFoundError()
+		self.entries = path.iterdir()
 
 	def __iter__(self) -> Iterator[RemotePath]:
 		return self.entries

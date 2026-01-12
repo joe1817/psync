@@ -112,8 +112,10 @@ class _ArgParser:
 		if isinstance(parsed_args.title, list):
 			parsed_args.title = " ".join(parsed_args.title)
 
-		parsed_args.no_header = parsed_args.no_header or parsed_args.no_header_or_footer
-		parsed_args.no_footer = parsed_args.no_footer or parsed_args.no_header_or_footer
+		parsed_args.header = not parsed_args.no_header and not parsed_args.no_header_or_footer
+		parsed_args.footer = not parsed_args.no_footer and not parsed_args.no_header_or_footer
+		del parsed_args.no_header
+		del parsed_args.no_footer
 		del parsed_args.no_header_or_footer
 
 		return parsed_args

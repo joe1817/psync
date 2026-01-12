@@ -21,7 +21,7 @@ from .sftp import RemotePath
 from .watch import _LocalWatcher
 from .types import _AbstractPath
 from .errors import StateError, UnsupportedOperationError, FilesystemErrorLimitError
-from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _TagFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
+from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
 
 class Results:
 	'''Various statistics and other information returned by `SyncRunner.run()`.'''
@@ -175,8 +175,8 @@ class Sync:
 			print_level              (int) : Log level for printing to console. (Default to `logging.INFO`.)
 			debug               (bool|int) : Sets console and file debugging levels to DEBUG. If an integer, the masks Sync.RAISE_UNKNOWN_ERRORS and Sync.RAISE_FS_ERRORS can be used to halt on their respective error types. (Defaults to `False`.)
 			title                    (str) : A strng to be printed in the header.
-			no_header               (bool) : Whether to skip logging header information. (Defaults to `False`.)
-			no_footer               (bool) : Whether to skip logging footer information. (Defaults to `False`.)
+			header                  (bool) : Whether to log header information. (Defaults to `True`.)
+			footer                  (bool) : Whether to log footer information. (Defaults to `True`.)
 
 			shutdown_src            (bool) : Shutdown the src system when done. (Defaults to `False`.)
 			shutdown_dst            (bool) : Shutdown the dst system when done. (Defaults to `False`.)
@@ -219,13 +219,14 @@ class Sync:
 		self._print_level        : int = logging.INFO
 		self._debug              : bool|int = False
 		self._title              : str|None = None
+		self._header             : bool = True
+		self._footer             : bool = True
 
 		self._shutdown_src       : bool = False
 		self._shutdown_dst       : bool = False
 
 		# no properties for these
 		self._handler_file       : logging.FileHandler|None = None
-		self._tags_to_hide       : set[_RecordTag] = set()
 		self._show_root_names    : bool = True
 
 		for key in kwargs:
@@ -268,10 +269,6 @@ class Sync:
 		handler_stderr.setLevel(max(print_level, logging.WARNING))
 
 		handler_stdout.addFilter(_DebugInfoFilter())
-		filter_tag = _TagFilter()
-		for k in self._tags_to_hide:
-			filter_tag[k] = True
-		handler_stdout.addFilter(filter_tag)
 
 		handler_stdout.setFormatter(_ConsoleFormatter())
 		handler_stderr.setFormatter(_ConsoleFormatter())
@@ -742,6 +739,26 @@ class Sync:
 		self._title = val
 
 	@property
+	def header(self) -> bool:
+		return self._header
+
+	@header.setter
+	def header(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'header' (expected bool): {val}")
+		self._header = val
+
+	@property
+	def footer(self) -> bool:
+		return self._footer
+
+	@footer.setter
+	def footer(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'footer' (expected bool): {val}")
+		self._footer = val
+
+	@property
 	def shutdown_src(self) -> bool:
 		return self._shutdown_src
 
@@ -829,32 +846,6 @@ class Sync:
 			raise TypeError(f"Bad type for property 'print_level' (expected int): {val}")
 		self._print_level = val
 
-	@property
-	def no_header(self):
-		return _RecordTag.HEADER in self._tags_to_hide
-
-	@no_header.setter
-	def no_header(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'no_header' (expected bool): {val}")
-		if val:
-			self._tags_to_hide.add(_RecordTag.HEADER)
-		else:
-			self._tags_to_hide.discard(_RecordTag.HEADER)
-
-	@property
-	def no_footer(self):
-		return _RecordTag.FOOTER in self._tags_to_hide
-
-	@no_footer.setter
-	def no_footer(self, val:bool) -> None:
-		if not isinstance(val, bool):
-			raise TypeError(f"Bad type for property 'no_footer' (expected bool): {val}")
-		if val:
-			self._tags_to_hide.add(_RecordTag.FOOTER)
-		else:
-			self._tags_to_hide.discard(_RecordTag.FOOTER)
-
 class SyncRunner:
 	'''`SyncRunner` performs the file sync operation in accordance to the options collected by a `Sync` object.'''
 
@@ -903,19 +894,18 @@ class SyncRunner:
 		results = Results(config)
 
 		try:
-			HEADER  = _RecordTag.HEADER.dict()
-			FOOTER  = _RecordTag.FOOTER.dict()
 			SYNC_OP = _RecordTag.SYNC_OP.dict()
 
 			config.logger.debug(repr(config))
 			config.logger.debug("")
 
-			width = max(len(str(config.src)), len(str(config.dst)), 7) + 3
-			if config.title:
-				config.logger.info(config.title, extra=HEADER)
-			config.logger.info("   " + str(config.src), extra=HEADER)
-			config.logger.info("-> " + str(config.dst), extra=HEADER)
-			config.logger.info("-" * width, extra=HEADER)
+			if config.header:
+				width = max(len(str(config.src)), len(str(config.dst)), 7) + 3
+				if config.title:
+					config.logger.info(config.title)
+				config.logger.info("   " + str(config.src))
+				config.logger.info("-> " + str(config.dst))
+				config.logger.info("-" * width)
 
 			for op in _get_operations(config):
 				if any(op.depends_on(failed_op) for failed_op, _ in results.sync_errors):
@@ -960,19 +950,20 @@ class SyncRunner:
 			if config.debug & Sync.RAISE_UNKNOWN_ERRORS:
 				raise e
 		finally:
-			config.logger.info("-" * width, extra=FOOTER)
-			for line in results.summary():
-				config.logger.info(line, extra=FOOTER)
+			if config.footer:
+				config.logger.info("-" * width)
+				for line in results.summary():
+					config.logger.info(line)
 
-			if results.failure_count:
-				config.logger.info("", extra=FOOTER)
-				config.logger.info(f"There were {results.failure_count} errors.", extra=FOOTER)
-				if results.failure_count <= 10 and results.total_count >= 50:
-					config.logger.info("Errors are reprinted below for convenience.", extra=FOOTER)
-					for op, exc in results.sync_errors:
-						config.logger.info(_exc_summary(exc), extra=FOOTER)
+				if results.failure_count:
+					config.logger.info("")
+					config.logger.info(f"There were {results.failure_count} errors.")
+					if results.failure_count <= 10 and results.total_count >= 50:
+						config.logger.info("Errors are reprinted below for convenience.")
+						for op, exc in results.sync_errors:
+							config.logger.info(_exc_summary(exc))
 
-			config.logger.info("", extra=FOOTER)
+				config.logger.info("")
 
 			if sync.log_file:
 				sync.close_file_handler()

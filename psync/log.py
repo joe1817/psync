@@ -1,13 +1,14 @@
 import sys
+import os
 import logging
 from enum import Enum
 
 # Summary of logging levels used in this package:
-# DEBUG    = useful for finding bugs
-# INFO     = operation performed, no problems encountered
-# WARNING  = problem encountered but the operation completed
-# ERROR    = problem encountered and the operation failed
 # CRITICAL = Exception raised which halted the program entirely
+# ERROR    = problem encountered and the operation failed
+# WARNING  = problem encountered but the operation completed
+# INFO     = operation performed, no problems encountered
+# DEBUG    = useful for finding bugs
 
 def _exc_summary(e) -> str:
 	'''Get a one-line summary of an `Exception`.'''
@@ -22,14 +23,6 @@ def _exc_summary(e) -> str:
 	else:
 		msg = str(e)
 	return msg
-
-class _RecordTag(Enum):
-	'''Tags for `logging.Record`s to allow filtering based on tag.'''
-
-	SYNC_OP = 1
-
-	def dict(self):
-		return {self.name: True}
 
 class _DebugInfoFilter(logging.Filter):
 	'''Logging filter that only allows DEBUG and INFO records to pass.'''
@@ -54,12 +47,62 @@ class _ConsoleFormatter(logging.Formatter):
 
 	def format(self, record):
 		msg = super().format(record)
-		extra_indent = "" if getattr(record, _RecordTag.SYNC_OP.name, False) else "  "
+		extra_indent = "" if getattr(record, "Operation", None) else "  "
 		if record.levelno == logging.DEBUG:
 			msg = extra_indent + msg.replace("\n", f"\n  {extra_indent}").rstrip(" ")
 		else:
 			msg = extra_indent + msg.replace("\n", f"\n{extra_indent}").rstrip(" ")
 		return msg
+
+class _RichConsoleFormatter(_ConsoleFormatter):
+
+	def format(self, record):
+		msg = super().format(record)
+		op = getattr(record, "Operation", None)
+
+		# Supplying a Formatter to a RichHandler will enable highlighting,
+		# even if highlighter=None is passed to RichHandler
+		record.highlighter = None
+
+		if op:
+			if "Rename" in op:
+				msg = f"[cyan]{msg}"
+			elif "Delete" in op:
+				msg = f"[red]{msg}"
+			elif "Update" in op:
+				msg = f"[yellow]{msg}"
+			elif "Create" in op:
+				msg = f"[green]{msg}"
+
+		return msg
+
+'''
+class ANSIColorFormatter(logging.Formatter):
+	# ANSI escape codes
+	COLORS = {
+		"RED"   : "\033[31m",
+		"GREEN" : "\033[32m",
+		"YELLOW": "\033[33m",
+		"CYAN"  : "\033[36m",
+		"RESET" : "\033[0m",
+	}
+
+	def format(self, record):
+		msg = super().format(record)
+		op = getattr(record, "Operation", None)
+
+		if op:
+			if "Rename" in op:
+				msg = f"{self.COLORS['CYAN']}{msg}{self.COLORS['RESET']}"
+			elif "Delete" in op:
+				msg = f"{self.COLORS['RED']}{msg}{self.COLORS['RESET']}"
+			elif "Update" in op:
+				msg = f"{self.COLORS['YELLOW']}{msg}{self.COLORS['RESET']}"
+			elif "Create" in op:
+				msg = f"{self.COLORS['GREEN']}{msg}{self.COLORS['RESET']}"
+
+		return msg
+'''
 
 class _LogFileFormatter(logging.Formatter):
 	'''Logging formatter for records saved to a log file.'''
@@ -90,6 +133,10 @@ def setup_logger():
 	'''Set up the "psync" package logger.'''
 
 	if not logger.handlers:
+		# enable ANSI escape codes on Windows
+		if sys.platform == "win32":
+			os.system('')
+
 		logger.setLevel(logging.INFO)
 		handler_stdout = logging.StreamHandler(sys.stdout)
 		handler_stderr = logging.StreamHandler(sys.stderr)

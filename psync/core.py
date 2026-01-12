@@ -11,9 +11,12 @@ from pathlib import Path
 from dataclasses import fields
 from typing import Literal, Final, Counter as CounterType
 from collections import Counter, namedtuple
+from rich.logging import RichHandler
+from rich.progress import Progress
+from contextlib import nullcontext
 
 from .config import _SyncConfig
-from .operations import _get_operations, _replace
+from .operations import _OperationsIterator, _replace
 from .operations import * # Operations
 from .filter import Filter, PathFilter
 from .helpers import _UniqueIDGenerator, _human_readable_size
@@ -21,7 +24,7 @@ from .sftp import RemotePath
 from .watch import _LocalWatcher
 from .types import _AbstractPath
 from .errors import StateError, UnsupportedOperationError, FilesystemErrorLimitError
-from .log import logger, _RecordTag, _DebugInfoFilter, _NonEmptyFilter, _ConsoleFormatter, _LogFileFormatter, _exc_summary
+from .log import logger, _DebugInfoFilter, _NonEmptyFilter, _ConsoleFormatter, _RichConsoleFormatter, _LogFileFormatter, _exc_summary
 
 class Results:
 	'''Various statistics and other information returned by `SyncRunner.run()`.'''
@@ -177,6 +180,7 @@ class Sync:
 			title                    (str) : A strng to be printed in the header.
 			header                  (bool) : Whether to log header information. (Defaults to `True`.)
 			footer                  (bool) : Whether to log footer information. (Defaults to `True`.)
+			rich                    (bool) : Print richly styled output to console. (Defaults to `False`.)
 
 			shutdown_src            (bool) : Shutdown the src system when done. (Defaults to `False`.)
 			shutdown_dst            (bool) : Shutdown the dst system when done. (Defaults to `False`.)
@@ -221,6 +225,7 @@ class Sync:
 		self._title              : str|None = None
 		self._header             : bool = True
 		self._footer             : bool = True
+		self._rich               : bool = False
 
 		self._shutdown_src       : bool = False
 		self._shutdown_dst       : bool = False
@@ -261,23 +266,36 @@ class Sync:
 		self.logger.propagate = False
 		self.logger.setLevel(logging.DEBUG)
 
-		handler_stdout = logging.StreamHandler(sys.stdout)
-		handler_stderr = logging.StreamHandler(sys.stderr)
-		handler_file : logging.FileHandler|None = None
+		if self.rich:
+			handler_rich = RichHandler(
+				rich_tracebacks=True,
+				markup=True,
+				highlighter=None, # ignored if a Formatter is given
+				show_time=False,
+				show_path=False,
+				show_level=False,
+			)
+			handler_rich.setLevel(print_level)
+			handler_rich.setFormatter(_RichConsoleFormatter())
+			self.logger.addHandler(handler_rich)
+		else:
+			handler_stdout = logging.StreamHandler(sys.stdout)
+			handler_stderr = logging.StreamHandler(sys.stderr)
 
-		handler_stdout.setLevel(print_level)
-		handler_stderr.setLevel(max(print_level, logging.WARNING))
+			handler_stdout.setLevel(print_level)
+			handler_stderr.setLevel(max(print_level, logging.WARNING))
 
-		handler_stdout.addFilter(_DebugInfoFilter())
+			handler_stdout.addFilter(_DebugInfoFilter())
 
-		handler_stdout.setFormatter(_ConsoleFormatter())
-		handler_stderr.setFormatter(_ConsoleFormatter())
+			handler_stdout.setFormatter(_ConsoleFormatter())
+			handler_stderr.setFormatter(_ConsoleFormatter())
 
-		self.logger.addHandler(handler_stdout)
-		self.logger.addHandler(handler_stderr)
+			self.logger.addHandler(handler_stdout)
+			self.logger.addHandler(handler_stderr)
 
 		log_file : Path|None = None
 		tmp_log_file : Path|None = None
+		handler_file : logging.FileHandler|None = None
 		if self.log_file is Sync._AUTO_LOGFILE:
 			log_file = self.log_file_root / f"{self.logger.name}.log"
 			with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", delete=False) as tmp_log:
@@ -759,6 +777,16 @@ class Sync:
 		self._footer = val
 
 	@property
+	def rich(self) -> bool:
+		return self._rich and not self._low_memory
+
+	@rich.setter
+	def rich(self, val:bool) -> None:
+		if not isinstance(val, bool):
+			raise TypeError(f"Bad type for arg 'rich' (expected bool): {val}")
+		self._rich = val
+
+	@property
 	def shutdown_src(self) -> bool:
 		return self._shutdown_src
 
@@ -894,8 +922,6 @@ class SyncRunner:
 		results = Results(config)
 
 		try:
-			SYNC_OP = _RecordTag.SYNC_OP.dict()
-
 			config.logger.debug(repr(config))
 			config.logger.debug("")
 
@@ -907,25 +933,35 @@ class SyncRunner:
 				config.logger.info("-> " + str(config.dst))
 				config.logger.info("-" * width)
 
-			for op in _get_operations(config):
-				if any(op.depends_on(failed_op) for failed_op, _ in results.sync_errors):
-					config.logger.debug(f"Chain failure: {op.summary}")
-					continue
+			operations = _OperationsIterator(config)
+			ctx = (lambda: Progress(transient=True)) if config.rich else nullcontext
 
-				config.logger.info(op.summary, extra=SYNC_OP)
+			with ctx() as progress:
+				if progress:
+					full_task = progress.add_task("Syncing...", total=len(operations))
 
-				if not config.dry_run:
-					try:
-						op.perform()
-						results.tally_success(op)
-					except OSError as e:
-						results.tally_failure(op, e)
-						if config.debug & Sync.RAISE_FS_ERRORS:
-							raise e
-						elif config.err_limit > 0 and results.failure_count >= config.err_limit:
-							raise FilesystemErrorLimitError()
-						else:
-							config.logger.error(_exc_summary(e))
+				for op in operations:
+					if any(op.depends_on(failed_op) for failed_op, _ in results.sync_errors):
+						config.logger.debug(f"Chain failure: {op.summary}")
+						continue
+
+					config.logger.info(op.summary, extra={"Operation": type(op).__name__})
+
+					if not config.dry_run:
+						try:
+							op.perform()
+							results.tally_success(op)
+						except OSError as e:
+							results.tally_failure(op, e)
+							if config.debug & Sync.RAISE_FS_ERRORS:
+								raise e
+							elif config.err_limit > 0 and results.failure_count >= config.err_limit:
+								raise FilesystemErrorLimitError()
+							else:
+								config.logger.error(_exc_summary(e))
+
+					if progress:
+						progress.update(full_task, advance=1)
 
 			results.status = Results.Status.COMPLETED
 		except KeyboardInterrupt as e:

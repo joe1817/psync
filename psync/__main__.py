@@ -62,6 +62,7 @@ class _ArgParser:
 	log_options.add_argument("-nh", "--no-header", action="store_true", default=None, help="Skip logging header information.")
 	log_options.add_argument("-nf", "--no-footer", action="store_true", default=None, help="Skip logging footer information.")
 	log_options.add_argument("-nhf", "--no-header-or-footer", action="store_true", default=None, help="Skip logging header and footer information.")
+	log_options.add_argument("-r", "--rich", action="store_true", default=None, help="Print richly styled output to console.")
 
 	misc_options = parser.add_argument_group("Miscellaneous")
 	misc_options.add_argument("--shutdown-src", action="store_true", default=None, help="Shutdown the src system when done.")

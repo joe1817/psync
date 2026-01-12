@@ -40,6 +40,7 @@ class _SyncConfig:
 	title              : str|None
 	header             : bool
 	footer             : bool
+	rich               : bool
 
 	shutdown_src       : bool
 	shutdown_dst       : bool

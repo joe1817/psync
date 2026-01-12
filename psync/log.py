@@ -26,9 +26,7 @@ def _exc_summary(e) -> str:
 class _RecordTag(Enum):
 	'''Tags for `logging.Record`s to allow filtering based on tag.'''
 
-	HEADER = 1
-	FOOTER = 2
-	SYNC_OP = 3
+	SYNC_OP = 1
 
 	def dict(self):
 		return {self.name: True}
@@ -44,21 +42,6 @@ class _NonEmptyFilter(logging.Filter):
 
 	def filter(self, record):
 		return bool(str(record.msg).strip())
-
-class _TagFilter(logging.Filter):
-	'''Logging filter that does not allow messages with certain tags supplied in `extras`.'''
-
-	def __init__(self, enabled:bool = True):
-		self.enabled : bool = enabled
-		self.hidden  : dict[_RecordTag, bool] = {}
-	def __getitem__(self, k:_RecordTag) -> bool:
-		return k in self.hidden and self.hidden[k]
-	def __setitem__(self, k:_RecordTag, v) -> None:
-		self.hidden[k] = v
-	def filter(self, record) -> bool:
-		if not self.enabled:
-			return False
-		return not any(self.hidden[k] and bool(getattr(record, k.name, False)) for k in self.hidden)
 
 class _ConsoleFormatter(logging.Formatter):
 	'''Logging formatter for records printed to the console.'''

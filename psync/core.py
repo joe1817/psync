@@ -268,10 +268,10 @@ class Sync:
 		handler_stderr.setLevel(max(print_level, logging.WARNING))
 
 		handler_stdout.addFilter(_DebugInfoFilter())
-		self.filter_tag = _TagFilter()
+		filter_tag = _TagFilter()
 		for k in self._tags_to_hide:
-			self.filter_tag[k] = True
-		handler_stdout.addFilter(self.filter_tag)
+			filter_tag[k] = True
+		handler_stdout.addFilter(filter_tag)
 
 		handler_stdout.setFormatter(_ConsoleFormatter())
 		handler_stderr.setFormatter(_ConsoleFormatter())
@@ -840,10 +840,7 @@ class Sync:
 		if val:
 			self._tags_to_hide.add(_RecordTag.HEADER)
 		else:
-			try:
-				self._tags_to_hide.remove(_RecordTag.HEADER)
-			except KeyError:
-				pass
+			self._tags_to_hide.discard(_RecordTag.HEADER)
 
 	@property
 	def no_footer(self):
@@ -856,10 +853,7 @@ class Sync:
 		if val:
 			self._tags_to_hide.add(_RecordTag.FOOTER)
 		else:
-			try:
-				self._tags_to_hide.remove(_RecordTag.FOOTER)
-			except KeyError:
-				pass
+			self._tags_to_hide.discard(_RecordTag.FOOTER)
 
 class SyncRunner:
 	'''`SyncRunner` performs the file sync operation in accordance to the options collected by a `Sync` object.'''

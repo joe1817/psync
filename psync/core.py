@@ -24,7 +24,7 @@ from .sftp import RemotePath
 from .watch import _LocalWatcher
 from .types import _AbstractPath
 from .errors import StateError, UnsupportedOperationError, FilesystemErrorLimitError
-from .log import logger, _DebugInfoFilter, _NonEmptyFilter, _ConsoleFormatter, _RichConsoleFormatter, _LogFileFormatter, _exc_summary
+from .log import logger, _DebugInfoFilter, _NonEmptyFilter, _Formatter, _RichConsoleFormatter, _exc_summary
 
 class Results:
 	'''Various statistics and other information returned by `SyncRunner.run()`.'''
@@ -287,8 +287,8 @@ class Sync:
 
 			handler_stdout.addFilter(_DebugInfoFilter())
 
-			handler_stdout.setFormatter(_ConsoleFormatter())
-			handler_stderr.setFormatter(_ConsoleFormatter())
+			handler_stdout.setFormatter(_Formatter())
+			handler_stderr.setFormatter(_Formatter())
 
 			self.logger.addHandler(handler_stdout)
 			self.logger.addHandler(handler_stderr)
@@ -311,7 +311,7 @@ class Sync:
 		if handler_file:
 			handler_file.setLevel(file_level)
 
-			handler_file.setFormatter(_LogFileFormatter())
+			handler_file.setFormatter(_Formatter())
 			handler_file.addFilter(_NonEmptyFilter())
 
 			self._handler_file = handler_file

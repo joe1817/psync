@@ -36,7 +36,7 @@ class _NonEmptyFilter(logging.Filter):
 	def filter(self, record):
 		return bool(str(record.msg).strip())
 
-class _ConsoleFormatter(logging.Formatter):
+class _Formatter(logging.Formatter):
 	'''Logging formatter for records printed to the console.'''
 
 	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -54,7 +54,7 @@ class _ConsoleFormatter(logging.Formatter):
 			msg = extra_indent + msg.replace("\n", f"\n{extra_indent}").rstrip(" ")
 		return msg
 
-class _RichConsoleFormatter(_ConsoleFormatter):
+class _RichConsoleFormatter(_Formatter):
 
 	def format(self, record):
 		msg = super().format(record)
@@ -76,76 +76,19 @@ class _RichConsoleFormatter(_ConsoleFormatter):
 
 		return msg
 
-'''
-class ANSIColorFormatter(logging.Formatter):
-	# ANSI escape codes
-	COLORS = {
-		"RED"   : "\033[31m",
-		"GREEN" : "\033[32m",
-		"YELLOW": "\033[33m",
-		"CYAN"  : "\033[36m",
-		"RESET" : "\033[0m",
-	}
-
-	def format(self, record):
-		msg = super().format(record)
-		op = getattr(record, "Operation", None)
-
-		if op:
-			if "Rename" in op:
-				msg = f"{self.COLORS['CYAN']}{msg}{self.COLORS['RESET']}"
-			elif "Delete" in op:
-				msg = f"{self.COLORS['RED']}{msg}{self.COLORS['RESET']}"
-			elif "Update" in op:
-				msg = f"{self.COLORS['YELLOW']}{msg}{self.COLORS['RESET']}"
-			elif "Create" in op:
-				msg = f"{self.COLORS['GREEN']}{msg}{self.COLORS['RESET']}"
-
-		return msg
-'''
-
-class _LogFileFormatter(logging.Formatter):
-	'''Logging formatter for records saved to a log file.'''
-
-	#BASE_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-	BASE_FORMAT = "%(message)s"
-
-	def __init__(self, fmt=BASE_FORMAT, datefmt=None, style="%"):
-		super().__init__(fmt, datefmt, style)
-
-	def format(self, record):
-		msg = super().format(record)
-		if record.levelno == logging.DEBUG:
-			msg = "  " + msg.replace("\n", "\n  ").rstrip(" ")
-		elif record.levelno == logging.INFO:
-			pass
-		elif record.levelno == logging.WARNING:
-			msg = f"WARNING: {msg}"
-		elif record.levelno == logging.ERROR:
-			msg = f"ERROR: {msg}"
-		elif record.levelno == logging.CRITICAL:
-			msg = f"*** CRITICAL ***: {msg}"
-		return msg
-
 logger = logging.getLogger("psync")
 
-def setup_logger():
-	'''Set up the "psync" package logger.'''
+# enable ANSI escape codes on Windows
+if sys.platform == "win32":
+	os.system("")
 
-	if not logger.handlers:
-		# enable ANSI escape codes on Windows
-		if sys.platform == "win32":
-			os.system('')
-
-		logger.setLevel(logging.INFO)
-		handler_stdout = logging.StreamHandler(sys.stdout)
-		handler_stderr = logging.StreamHandler(sys.stderr)
-		handler_stdout.addFilter(_DebugInfoFilter())
-		handler_stdout.setLevel(logging.DEBUG)
-		handler_stderr.setLevel(logging.WARNING)
-		handler_stdout.setFormatter(_ConsoleFormatter())
-		handler_stderr.setFormatter(_ConsoleFormatter())
-		logger.addHandler(handler_stdout)
-		logger.addHandler(handler_stderr)
-
-setup_logger()
+logger.setLevel(logging.INFO)
+handler_stdout = logging.StreamHandler(sys.stdout)
+handler_stderr = logging.StreamHandler(sys.stderr)
+handler_stdout.addFilter(_DebugInfoFilter())
+handler_stdout.setLevel(logging.DEBUG)
+handler_stderr.setLevel(logging.WARNING)
+handler_stdout.setFormatter(_Formatter())
+handler_stderr.setFormatter(_Formatter())
+logger.addHandler(handler_stdout)
+logger.addHandler(handler_stderr)

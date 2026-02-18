@@ -240,7 +240,7 @@ class _Diff:
 
 	def get_rename_chains(self, src_dir_hash: dict[_Dir, int]|None, dst_dir_hash: dict[_Dir, int]|None):
 		'''
-		Get chains of file/directories that need to be renamed in order.
+		Get chains of files/directories that need to be renamed in order.
 
 		Most renames will be a chain of length 1, but renames that involve swaps or overlapping file names will have longer chain lengths.
 		'''
@@ -347,7 +347,12 @@ class _Diff:
 			if chain:
 				chains.append(chain)
 				removed_by_rename.update(potential_remove)
-				created_by_rename.update(potential_create)
+				for pc in potential_create:
+					while pc:
+						prev_len = len(created_by_rename)
+						created_by_rename.add(pc)
+						if prev_len == len(created_by_rename): break
+						pc = pc.parent
 			first = None
 
 		#changed_by_rename = removed_by_rename.intersection(created_by_rename)
